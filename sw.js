@@ -1,10 +1,13 @@
-const CACHE_NAME = "kmz2gpx-v1";
+const CACHE_NAME = "kmz2gpx-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./style.css",
   "./app.js",
   "./manifest.json",
+  "./vendor/jszip/jszip.min.js",
+  "./vendor/leaflet/leaflet.js",
+  "./vendor/leaflet/leaflet.css",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/icon-maskable-192.png",
