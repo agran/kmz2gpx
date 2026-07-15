@@ -1,4 +1,4 @@
-const CACHE_NAME = "kmz2gpx-v10";
+const CACHE_NAME = "kmz2gpx-v11";
 const APP_SHELL = [
   "./",
   "./index.html",

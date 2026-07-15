@@ -374,20 +374,49 @@ function legToPoints(leg) {
 async function routeChunkInOneRequest(points) {
   const coordsParam = points.map((p) => `${p.lon},${p.lat}`).join(";");
   const url = `${TRAIL_ROUTING_URL}${coordsParam}?overview=false&geometries=geojson&steps=true`;
-  const response = await fetch(url);
+
+  console.log(`[OSRM] Запрос: ${points.length} точек →`, url);
+  let response;
+  try {
+    response = await fetch(url);
+  } catch (networkErr) {
+    console.warn("[OSRM] Запрос не выполнен (сеть/CORS):", networkErr);
+    throw networkErr;
+  }
+  console.log(`[OSRM] Ответ сервера: HTTP ${response.status} ${response.statusText}`);
+
   if (response.status === 429) {
     trailRoutingRateLimited = true;
+    console.warn(
+      "[OSRM] Сервис вернул 429 Too Many Requests — запрос отклонён, дальнейшие запросы в этом прогоне отменяются",
+    );
     throw new Error("Routing service rate limit (429)");
   }
-  if (!response.ok) throw new Error("Routing request failed");
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    console.warn(
+      `[OSRM] Запрос отклонён: HTTP ${response.status} ${response.statusText}`,
+      bodyText.slice(0, 300),
+    );
+    throw new Error("Routing request failed");
+  }
+
   const data = await response.json();
   if (data.code !== "Ok" || !data.routes || !data.routes.length) {
+    console.warn(
+      `[OSRM] Сервис ответил кодом "${data.code}" вместо "Ok" — маршрут не построен`,
+      data,
+    );
     throw new Error("No route found");
   }
 
   const offTrail = (data.waypoints || []).map(
     (wp) =>
       !!wp && typeof wp.distance === "number" && wp.distance > TRAIL_WAYPOINT_SNAP_MAX_METERS,
+  );
+  console.log(
+    `[OSRM] Успех: код "${data.code}", ${data.waypoints ? data.waypoints.length : 0} waypoints, ` +
+      `${offTrail.filter(Boolean).length} из них похоже не на тропе (snap > ${TRAIL_WAYPOINT_SNAP_MAX_METERS} м)`,
   );
 
   const legs = data.routes[0].legs || [];
@@ -398,15 +427,23 @@ async function routeChunkInOneRequest(points) {
     const straight = haversineMeters(a, b);
     const leg = legs[i];
     const endpointOffTrail = offTrail[i] || offTrail[i + 1];
-    let segmentPoints = [a, b];
-    if (
-      !endpointOffTrail &&
+    const withinDeviation =
       straight >= TRAIL_ROUTE_MIN_SEGMENT_METERS &&
-      leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)
-    ) {
+      leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO);
+    let segmentPoints = [a, b];
+    let usedTrail = false;
+    if (!endpointOffTrail && withinDeviation) {
       const legPoints = legToPoints(leg);
-      if (legPoints.length >= 2) segmentPoints = legPoints;
+      if (legPoints.length >= 2) {
+        segmentPoints = legPoints;
+        usedTrail = true;
+      }
     }
+    console.log(
+      `[OSRM]   Отрезок ${i + 1}/${legs.length}: прямая ${straight.toFixed(0)} м, ` +
+        `по тропе ${leg.distance.toFixed(0)} м → ${usedTrail ? "используем тропу" : "используем прямую"}` +
+        (endpointOffTrail ? " (точка снята с тропы слишком далеко)" : ""),
+    );
     for (let j = 1; j < segmentPoints.length; j++) result.push(segmentPoints[j]);
   }
   return result;
@@ -420,10 +457,20 @@ async function routePointsViaTrails(points) {
   if (points.length < 2) return points.slice();
   trailRoutingRateLimited = false;
 
+  console.log(
+    `[OSRM] Прокладываем маршрут для ${points.length} точек одним запросом...`,
+  );
   try {
-    return await routeChunkInOneRequest(points);
+    const routed = await routeChunkInOneRequest(points);
+    console.log(
+      `[OSRM] Готово: единый запрос успешен, итогово точек в маршруте: ${routed.length}`,
+    );
+    return routed;
   } catch (err) {
     if (trailRoutingRateLimited) {
+      console.warn(
+        "[OSRM] Сервис отклонил запрос из-за ограничения частоты (429) — все точки соединяются напрямую",
+      );
       showToast(
         "Сервис маршрутов по тропам временно ограничил запросы — точки соединены напрямую",
         true,
@@ -431,7 +478,7 @@ async function routePointsViaTrails(points) {
       return points.slice();
     }
     console.warn(
-      "Не удалось построить единый маршрут по тропам для всех точек, пробуем частями:",
+      "[OSRM] Единый запрос со всеми точками не удался, пробуем частями:",
       err,
     );
     return routePointsViaTrailsChunked(points);
@@ -446,11 +493,17 @@ async function routePointsViaTrailsChunked(points) {
     points,
     TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST,
   );
+  console.log(
+    `[OSRM] Разбиваем на ${chunks.length} запрос(а) по ${TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST} точек`,
+  );
   const result = [points[0]];
 
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c];
     if (trailRoutingRateLimited) {
+      console.warn(
+        `[OSRM] Пропуск части ${c + 1}/${chunks.length} — уже ограничены (429)`,
+      );
       for (let j = 1; j < chunk.length; j++) result.push(chunk[j]);
       continue;
     }
@@ -460,7 +513,7 @@ async function routePointsViaTrailsChunked(points) {
     } catch (err) {
       if (!trailRoutingRateLimited) {
         console.warn(
-          "Не удалось проложить маршрут по тропам для участка, используем прямые линии:",
+          `[OSRM] Часть ${c + 1}/${chunks.length} не проложена, используем прямые линии:`,
           err,
         );
       }
