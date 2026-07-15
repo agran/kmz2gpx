@@ -582,10 +582,9 @@ function togglePointSelection(id) {
 function createPointMarker(point) {
   const marker = L.marker([point.lat, point.lon], {
     icon: pointDivIcon(point.selected),
-    draggable: true,
+    draggable: mapDragModeRequested(),
     autoPan: true,
   });
-  if (!mapDragModeRequested()) marker.dragging.disable();
   marker.bindTooltip(escapeXml(point.name));
   marker.on("click", (e) => {
     L.DomEvent.stopPropagation(e);
