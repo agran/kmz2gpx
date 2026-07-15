@@ -75,28 +75,124 @@ function parseCoordsList(text) {
   return text.trim().split(/\s+/).map(parseCoordToken).filter(Boolean);
 }
 
-/* ---------- KML / KMZ parsing ---------- */
+/* ---------- KML / KMZ / GPX parsing ---------- */
 
-async function readFileAsKmlText(file) {
+function parseGpxPointEl(el) {
+  const lat = parseFloat(el.getAttribute("lat"));
+  const lon = parseFloat(el.getAttribute("lon"));
+  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  const eleEl = getDirectChild(el, "ele");
+  const timeEl = getDirectChild(el, "time");
+  return {
+    lat,
+    lon,
+    ele: eleEl ? parseFloat(getText(eleEl)) || 0 : 0,
+    time: timeEl ? getText(timeEl) || null : null,
+  };
+}
+
+function parseGpx(gpxText) {
+  const doc = new DOMParser().parseFromString(gpxText, "application/xml");
+  const parserError = doc.getElementsByTagName("parsererror")[0];
+  if (parserError) {
+    throw new Error(
+      "Не удалось разобрать GPX: файл повреждён или имеет неверный формат",
+    );
+  }
+
+  const points = [];
+  const tracks = [];
+  let pointId = 0;
+  let trackId = 0;
+
+  for (const wptEl of doc.getElementsByTagName("wpt")) {
+    const coord = parseGpxPointEl(wptEl);
+    if (!coord) continue;
+    const nameEl = getDirectChild(wptEl, "name");
+    pointId += 1;
+    points.push({
+      id: pointId - 1,
+      name: getText(nameEl) || `Точка ${pointId}`,
+      lat: coord.lat,
+      lon: coord.lon,
+      ele: coord.ele,
+      time: coord.time,
+      selected: true,
+    });
+  }
+
+  for (const trkEl of doc.getElementsByTagName("trk")) {
+    const nameEl = getDirectChild(trkEl, "name");
+    const segments = [];
+    for (const segEl of trkEl.getElementsByTagName("trkseg")) {
+      const seg = [];
+      for (const ptEl of segEl.getElementsByTagName("trkpt")) {
+        const coord = parseGpxPointEl(ptEl);
+        if (coord) seg.push(coord);
+      }
+      if (seg.length) segments.push(seg);
+    }
+    if (segments.length) {
+      trackId += 1;
+      tracks.push({
+        id: trackId,
+        name: getText(nameEl) || `Трек ${trackId}`,
+        segments,
+        selected: true,
+      });
+    }
+  }
+
+  for (const rteEl of doc.getElementsByTagName("rte")) {
+    const nameEl = getDirectChild(rteEl, "name");
+    const seg = [];
+    for (const ptEl of rteEl.getElementsByTagName("rtept")) {
+      const coord = parseGpxPointEl(ptEl);
+      if (coord) seg.push(coord);
+    }
+    if (seg.length) {
+      trackId += 1;
+      tracks.push({
+        id: trackId,
+        name: getText(nameEl) || `Маршрут ${trackId}`,
+        segments: [seg],
+        selected: true,
+      });
+    }
+  }
+
+  return { points, tracks };
+}
+
+// Reads a file and parses it regardless of format: KMZ (zip with a .kml
+// inside), plain KML, or GPX. Detected primarily by content, since some
+// files may be misnamed or lack the expected extension.
+async function readAndParseFile(file) {
   const buffer = await file.arrayBuffer();
-  // Try to treat the file as a zip archive (KMZ).
+
   try {
     const zip = await JSZip.loadAsync(buffer);
     const kmlEntryName = Object.keys(zip.files)
       .filter((n) => !zip.files[n].dir)
       .find((n) => n.toLowerCase().endsWith(".kml"));
     if (kmlEntryName) {
-      return await zip.files[kmlEntryName].async("string");
+      const kmlText = await zip.files[kmlEntryName].async("string");
+      return parseKml(kmlText);
     }
-    throw new Error("В архиве KMZ не найден файл .kml");
   } catch (zipErr) {
-    // Not a zip (or no kml inside) — fall back to treating it as raw KML text.
-    const text = new TextDecoder("utf-8").decode(buffer);
-    if (text.includes("<kml") || text.includes("<Placemark")) {
-      return text;
-    }
-    throw zipErr;
+    // Not a zip archive — fall through to the plain-text formats below.
   }
+
+  const text = new TextDecoder("utf-8").decode(buffer);
+  if (text.includes("<gpx")) {
+    return parseGpx(text);
+  }
+  if (text.includes("<kml") || text.includes("<Placemark")) {
+    return parseKml(text);
+  }
+  throw new Error(
+    "Не удалось распознать формат файла — поддерживаются KMZ, KML и GPX",
+  );
 }
 
 function parseKml(kmlText) {
@@ -691,6 +787,10 @@ let trackLayerById = {};
 let pointLayerById = {};
 let pointsTrackPreviewLayers = [];
 let previewRequestToken = 0;
+// Tracks the point most recently added via a map click, so a second click on
+// that exact point (while still in add mode) removes it — a quick "undo"
+// for an accidental/misplaced click, without affecting any other point.
+let lastAddedPointId = null;
 
 function mapClickAddModeRequested() {
   const checkbox = document.getElementById("map-click-add-mode");
@@ -754,7 +854,8 @@ function previewSegmentStyle(viaTrail) {
 
 function previewSegmentTooltip(viaTrail) {
   if (viaTrail === true) return "По тропе";
-  if (viaTrail === false) return "Напрямую (тропа не найдена или точка не на тропе)";
+  if (viaTrail === false)
+    return "Напрямую (тропа не найдена или точка не на тропе)";
   return "Предпросмотр маршрута из выбранных точек";
 }
 
@@ -778,7 +879,10 @@ function updatePointsTrackPreview() {
   Promise.resolve(buildTrackPointsForExport(selectedPoints))
     .catch(() => {
       const ordered = maybeOrderByProximity(selectedPoints);
-      return { points: ordered, segments: [{ points: ordered, viaTrail: null }] };
+      return {
+        points: ordered,
+        segments: [{ points: ordered, viaTrail: null }],
+      };
     })
     .then(({ segments }) => {
       if (myToken !== previewRequestToken || !mapLayerGroup) return;
@@ -811,6 +915,20 @@ function togglePointSelection(id) {
   updatePointsTrackPreview();
 }
 
+// Removes a point entirely (used to "undo" a just-added point on a second
+// click while in map-click-add-mode).
+function removePoint(id) {
+  const idx = state.points.findIndex((p) => p.id === id);
+  if (idx === -1) return;
+  state.points.splice(idx, 1);
+  const marker = pointLayerById[id];
+  if (marker && mapLayerGroup) mapLayerGroup.removeLayer(marker);
+  delete pointLayerById[id];
+  if (lastAddedPointId === id) lastAddedPointId = null;
+  renderLists();
+  updatePointsTrackPreview();
+}
+
 function createPointMarker(point) {
   const marker = L.marker([point.lat, point.lon], {
     icon: pointDivIcon(point.selected),
@@ -820,10 +938,16 @@ function createPointMarker(point) {
   marker.bindTooltip(escapeXml(point.name));
   marker.on("click", (e) => {
     L.DomEvent.stopPropagation(e);
-    // While adding points by clicking the map, clicking an existing point
-    // shouldn't change its selection — the click is meant to place a new
-    // point there, not to toggle this one on/off.
-    if (mapClickAddModeRequested()) return;
+    if (mapClickAddModeRequested()) {
+      // A second click on the point that was *just* added removes it again
+      // (quick undo for a misplaced click). Any other point is left alone
+      // — the click is meant for adding, not for toggling selection.
+      if (point.id === lastAddedPointId) {
+        removePoint(point.id);
+        showToast("Точка удалена");
+      }
+      return;
+    }
     togglePointSelection(point.id);
   });
   marker.on("dragend", () => {
@@ -853,6 +977,7 @@ function addManualPoint(lat, lon, name) {
   const marker = createPointMarker(point);
   marker.addTo(mapLayerGroup);
   pointLayerById[point.id] = marker;
+  lastAddedPointId = point.id;
   if (wasEmpty) {
     mapInstance.setView([lat, lon], 15);
   }
@@ -876,10 +1001,13 @@ function renderMap() {
       const polyline = L.polyline(latlngs, trackStyle(track.selected));
       polyline.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-        // While adding points by clicking the map, clicking an existing
-        // track shouldn't change its selection — the click is meant to
-        // place a new point there, not to toggle this track on/off.
-        if (mapClickAddModeRequested()) return;
+        if (mapClickAddModeRequested()) {
+          // Let the user place a point directly on the track instead of
+          // toggling its selection — that's what the click was meant to do.
+          addManualPoint(e.latlng.lat, e.latlng.lng, "");
+          showToast("Точка добавлена по клику на карте");
+          return;
+        }
         toggleTrackSelection(track.id);
       });
       polyline.bindTooltip(escapeXml(track.name));
@@ -1058,10 +1186,11 @@ document.querySelectorAll("button[data-action]").forEach((btn) => {
 document.getElementById("reset-btn").addEventListener("click", () => {
   state.points = [];
   state.tracks = [];
+  lastAddedPointId = null;
   fileInput.value = "";
   fileStatus.textContent = "";
   fileStatus.classList.remove("error");
-  fileDropText.textContent = "Нажмите, чтобы выбрать KMZ/KML файл";
+  fileDropText.textContent = "Нажмите, чтобы выбрать KMZ/KML/GPX файл";
   renderLists();
   renderMap();
 });
@@ -1075,8 +1204,7 @@ fileInput.addEventListener("change", async () => {
   fileStatus.textContent = "Обработка файла...";
 
   try {
-    const kmlText = await readFileAsKmlText(file);
-    const { points, tracks } = parseKml(kmlText);
+    const { points, tracks } = await readAndParseFile(file);
 
     if (!points.length && !tracks.length) {
       throw new Error("В файле не найдено ни точек, ни треков");
@@ -1089,7 +1217,8 @@ fileInput.addEventListener("change", async () => {
 
     state.points = state.points.concat(newPoints);
     state.tracks = state.tracks.concat(newTracks);
-    state.fileBaseName = file.name.replace(/\.(kmz|kml)$/i, "") || "export";
+    state.fileBaseName =
+      file.name.replace(/\.(kmz|kml|gpx)$/i, "") || "export";
 
     fileStatus.textContent = `Добавлено: ${tracks.length} трек(ов), ${points.length} точ(ек). Всего: ${state.tracks.length} трек(ов), ${state.points.length} точ(ек)`;
     renderLists();
