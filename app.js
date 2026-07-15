@@ -6,11 +6,6 @@ const state = {
   points: [], // { id, name, lat, lon, ele, time, selected }
   tracks: [], // { id, name, segments: [ [ {lat, lon, ele, time}, ... ] ], selected }
   fileBaseName: "export",
-  // Point-id pairs ("idA_idB", smaller id first) that the user has
-  // manually told the proximity-ordering algorithm never to connect
-  // directly — e.g. to break up a leg that looks fine geometrically but
-  // isn't actually how the route goes.
-  forbiddenConnections: new Set(),
 };
 
 /* ---------- DOM refs ---------- */
@@ -343,22 +338,6 @@ function pointsAsTrackRequested() {
   const checkbox = document.getElementById("points-as-track");
   return !!(checkbox && checkbox.checked);
 }
-function pointsOrderByProximityRequested() {
-  const checkbox = document.getElementById("points-order-by-proximity");
-  return !!(checkbox && checkbox.checked);
-}
-
-function connectionKey(idA, idB) {
-  return idA < idB ? `${idA}_${idB}` : `${idB}_${idA}`;
-}
-
-function isConnectionForbidden(a, b) {
-  return state.forbiddenConnections.has(connectionKey(a.id, b.id));
-}
-
-function forbidConnection(a, b) {
-  state.forbiddenConnections.add(connectionKey(a.id, b.id));
-}
 
 function haversineMeters(a, b) {
   const R = 6371000;
@@ -373,131 +352,8 @@ function haversineMeters(a, b) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-// Greedy nearest-neighbor construction: starts from the first point (in
-// list order) and repeatedly jumps to the closest remaining point. Gives a
-// reasonable starting order, but on its own it tends to strand a handful of
-// points in the wrong place — whichever point happens to be nearest *at
-// that particular step* isn't necessarily where it truly belongs in the
-// final path, so a "stray" point can end up visited way out of sequence.
-function nearestNeighborOrder(points) {
-  const remaining = points.slice();
-  const ordered = [remaining.shift()];
-  while (remaining.length) {
-    const last = ordered[ordered.length - 1];
-    let bestIndex = -1;
-    let bestDist = Infinity;
-    for (let i = 0; i < remaining.length; i++) {
-      if (isConnectionForbidden(last, remaining[i])) continue;
-      const dist = haversineMeters(last, remaining[i]);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIndex = i;
-      }
-    }
-    if (bestIndex === -1) {
-      // Every remaining point is manually forbidden from connecting to
-      // `last` — a forbidden connection is a strong preference, not a hard
-      // constraint, so fall back to plain nearest-neighbor rather than
-      // getting stuck.
-      for (let i = 0; i < remaining.length; i++) {
-        const dist = haversineMeters(last, remaining[i]);
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestIndex = i;
-        }
-      }
-    }
-    ordered.push(remaining.splice(bestIndex, 1)[0]);
-  }
-  return ordered;
-}
-
-// Or-opt: pulls a single point out of the path and reinserts it wherever it
-// actually fits best (including at either end of the path), whenever that
-// shortens the total length. This is what specifically fixes "stray"
-// points: a clarifying point added out of sequence gets moved to sit
-// between the two points it geographically belongs between, instead of
-// staying wherever the nearest-neighbor walk happened to visit it.
-//
-// Deliberately does NOT try to "un-cross" the path (that's what 2-opt
-// would do) — a real hiking route very often backtracks along (or right
-// next to) itself on the way back, which looks like a crossing/overlap on
-// the map but is completely correct, so treating every crossing as a
-// defect to fix would scramble perfectly good out-and-back routes.
-function orOptImprove(points) {
-  let path = points.slice();
-  let improved = true;
-  while (improved) {
-    improved = false;
-    for (let i = 0; i < path.length; i++) {
-      const point = path[i];
-      const before = i > 0 ? path[i - 1] : null;
-      const after = i < path.length - 1 ? path[i + 1] : null;
-      const removalGain =
-        (before ? haversineMeters(before, point) : 0) +
-        (after ? haversineMeters(point, after) : 0) -
-        (before && after ? haversineMeters(before, after) : 0);
-      // A manually forbidden connection can end up in the path anyway (see
-      // the nearest-neighbor fallback above) — in that case any legal spot
-      // is preferable to leaving it in place, not just a cheaper one.
-      const currentlyViolates =
-        (before && isConnectionForbidden(before, point)) ||
-        (after && isConnectionForbidden(point, after));
-
-      const reduced = path.slice(0, i).concat(path.slice(i + 1));
-      let bestGap = -1;
-      let bestInsertionCost = currentlyViolates ? Infinity : removalGain;
-      for (let gap = 0; gap <= reduced.length; gap++) {
-        // gap === i is the point's current position; gap === i - 1 puts it
-        // right back where it started too (same edges, zero-cost no-op) —
-        // skip both so we only act on genuine improvements.
-        if (gap === i || gap === i - 1) continue;
-        const left = gap > 0 ? reduced[gap - 1] : null;
-        const right = gap < reduced.length ? reduced[gap] : null;
-        if (
-          (left && isConnectionForbidden(left, point)) ||
-          (right && isConnectionForbidden(point, right))
-        ) {
-          continue;
-        }
-        const insertionCost =
-          (left ? haversineMeters(left, point) : 0) +
-          (right ? haversineMeters(point, right) : 0) -
-          (left && right ? haversineMeters(left, right) : 0);
-        if (insertionCost < bestInsertionCost - 1e-6) {
-          bestInsertionCost = insertionCost;
-          bestGap = gap;
-        }
-      }
-      if (bestGap !== -1) {
-        reduced.splice(bestGap, 0, point);
-        path = reduced;
-        improved = true;
-      }
-    }
-  }
-  return path;
-}
-
-// Reorders points to (approximately) minimize total path length: builds an
-// initial nearest-neighbor walk, then repeatedly refines it with Or-opt
-// (relocates individual stray points to wherever they actually fit) until
-// it finds no further improvement. Useful when clarifying/extra points
-// were appended to the end of the list instead of being placed in their
-// proper position along the route.
-function orderPointsByProximity(points) {
-  if (points.length < 3) return points.slice();
-  return orOptImprove(nearestNeighborOrder(points));
-}
-
-function maybeOrderByProximity(points) {
-  return pointsOrderByProximityRequested()
-    ? orderPointsByProximity(points)
-    : points;
-}
-
 async function buildTrackPointsForExport(points) {
-  return { points: maybeOrderByProximity(points) };
+  return { points: points.slice() };
 }
 
 function pointsToTrack(points, name) {
@@ -533,7 +389,7 @@ function gpxForScope(scope) {
           const tracks = pointsTrack
             ? [...state.tracks, pointsTrack]
             : state.tracks;
-          return buildGpx({ tracks });
+          return buildGpx({ points, tracks });
         });
       }
       return buildGpx({ points: state.points, tracks: state.tracks });
@@ -544,7 +400,7 @@ function gpxForScope(scope) {
       if (asTrack) {
         return buildTrackPointsForExport(state.points).then(({ points }) => {
           const pointsTrack = pointsToTrack(points);
-          return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+          return buildGpx({ points, tracks: pointsTrack ? [pointsTrack] : [] });
         });
       }
       return buildGpx({ points: state.points });
@@ -554,7 +410,7 @@ function gpxForScope(scope) {
       if (asTrack) {
         return buildTrackPointsForExport(selected).then(({ points }) => {
           const pointsTrack = pointsToTrack(points);
-          return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+          return buildGpx({ points, tracks: pointsTrack ? [pointsTrack] : [] });
         });
       }
       return buildGpx({ points: selected });
@@ -685,10 +541,9 @@ function updatePointsTrackPreview() {
   const selectedPoints = state.points.filter((p) => p.selected);
   if (selectedPoints.length < 2) return;
 
-  const ordered = maybeOrderByProximity(selectedPoints);
-  for (let i = 0; i < ordered.length - 1; i++) {
-    const a = ordered[i];
-    const b = ordered[i + 1];
+  for (let i = 0; i < selectedPoints.length - 1; i++) {
+    const a = selectedPoints[i];
+    const b = selectedPoints[i + 1];
     const line = L.polyline(
       [
         [a.lat, a.lon],
@@ -701,7 +556,7 @@ function updatePointsTrackPreview() {
         dashArray: "2 8",
       },
     );
-    line.bindTooltip("Клик — удалить это соединение и перестроить маршрут");
+    line.bindTooltip("Предпросмотр маршрута из выбранных точек");
     line.on("click", (e) => {
       L.DomEvent.stopPropagation(e);
       if (mapClickAddModeRequested()) {
@@ -709,18 +564,7 @@ function updatePointsTrackPreview() {
         // on the line instead of editing the connection.
         addManualPoint(e.latlng.lat, e.latlng.lng, "");
         showToast("Точка добавлена по клику на карте");
-        return;
       }
-      forbidConnection(a, b);
-      if (!pointsOrderByProximityRequested()) {
-        document.getElementById("points-order-by-proximity").checked = true;
-        showToast(
-          "Соединение удалено. Включено «соединять по близости» — иначе его нечем заменить",
-        );
-      } else {
-        showToast("Соединение удалено, маршрут перестроен");
-      }
-      updatePointsTrackPreview();
     });
     line.addTo(mapLayerGroup);
     line.bringToBack();
@@ -766,9 +610,8 @@ function removePoint(id) {
 // sometimes passes through the very same junction more than once (e.g. a
 // there-and-back side spur off a junction that's also on the main way
 // through), and that junction genuinely needs 3 (or 4) connections. Since
-// the ordering algorithm treats every point as an independent node,
-// duplicating the junction point gives the extra node the proximity
-// ordering needs to route through that spot twice.
+// the exported track follows the points in list order, duplicating the
+// junction point gives it the extra list entry needed to be visited twice.
 function duplicatePoint(id) {
   const original = state.points.find((p) => p.id === id);
   if (!original) return;
@@ -1010,12 +853,6 @@ document.getElementById("points-as-track").addEventListener("change", () => {
   updatePointsTrackPreview();
 });
 
-document
-  .getElementById("points-order-by-proximity")
-  .addEventListener("change", () => {
-    updatePointsTrackPreview();
-  });
-
 document.getElementById("map-drag-mode").addEventListener("change", () => {
   const enabled = mapDragModeRequested();
   for (const marker of Object.values(pointLayerById)) {
@@ -1050,7 +887,6 @@ document.querySelectorAll("button[data-action]").forEach((btn) => {
 document.getElementById("reset-btn").addEventListener("click", () => {
   state.points = [];
   state.tracks = [];
-  state.forbiddenConnections.clear();
   lastAddedPointId = null;
   fileInput.value = "";
   fileStatus.textContent = "";
