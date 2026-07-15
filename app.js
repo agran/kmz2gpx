@@ -243,7 +243,54 @@ function pointsAsTrackRequested() {
   const checkbox = document.getElementById("points-as-track");
   return !!(checkbox && checkbox.checked);
 }
+function pointsOrderByProximityRequested() {
+  const checkbox = document.getElementById("points-order-by-proximity");
+  return !!(checkbox && checkbox.checked);
+}
 
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLon = Math.sin(dLon / 2);
+  const h =
+    sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+// Greedy nearest-neighbor reordering: starts from the first point (in list
+// order) and repeatedly jumps to the closest remaining point. Useful when
+// clarifying/extra points were appended to the end of the list instead of
+// being placed in their proper position along the route.
+function orderPointsByProximity(points) {
+  if (points.length < 3) return points.slice();
+  const remaining = points.slice();
+  const ordered = [remaining.shift()];
+  while (remaining.length) {
+    const last = ordered[ordered.length - 1];
+    let bestIndex = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const dist = haversineMeters(last, remaining[i]);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIndex = i;
+      }
+    }
+    ordered.push(remaining.splice(bestIndex, 1)[0]);
+  }
+  return ordered;
+}
+
+function maybeOrderByProximity(points) {
+  return pointsOrderByProximityRequested()
+    ? orderPointsByProximity(points)
+    : points;
+}
 function pointsToTrack(points, name) {
   if (!points.length) return null;
   return {
@@ -260,7 +307,7 @@ function gpxForScope(scope) {
   switch (scope) {
     case "all": {
       if (asTrack) {
-        const pointsTrack = pointsToTrack(state.points);
+        const pointsTrack = pointsToTrack(maybeOrderByProximity(state.points));
         const tracks = pointsTrack
           ? [...state.tracks, pointsTrack]
           : state.tracks;
@@ -272,7 +319,7 @@ function gpxForScope(scope) {
       return buildGpx({ tracks: state.tracks.filter((t) => t.selected) });
     case "points-all": {
       if (asTrack) {
-        const pointsTrack = pointsToTrack(state.points);
+        const pointsTrack = pointsToTrack(maybeOrderByProximity(state.points));
         return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
       }
       return buildGpx({ points: state.points });
@@ -280,7 +327,7 @@ function gpxForScope(scope) {
     case "points-selected": {
       const selected = state.points.filter((p) => p.selected);
       if (asTrack) {
-        const pointsTrack = pointsToTrack(selected);
+        const pointsTrack = pointsToTrack(maybeOrderByProximity(selected));
         return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
       }
       return buildGpx({ points: selected });
@@ -391,7 +438,8 @@ function updatePointsTrackPreview() {
   if (!pointsAsTrackRequested()) return;
   const selectedPoints = state.points.filter((p) => p.selected);
   if (selectedPoints.length < 2) return;
-  const latlngs = selectedPoints.map((p) => [p.lat, p.lon]);
+  const orderedPoints = maybeOrderByProximity(selectedPoints);
+  const latlngs = orderedPoints.map((p) => [p.lat, p.lon]);
   pointsTrackPreviewLine = L.polyline(latlngs, {
     color: "#16a34a",
     weight: 4,
@@ -570,6 +618,12 @@ document.getElementById("points-select-none").addEventListener("click", () => {
 document.getElementById("points-as-track").addEventListener("change", () => {
   updatePointsTrackPreview();
 });
+
+document
+  .getElementById("points-order-by-proximity")
+  .addEventListener("change", () => {
+    updatePointsTrackPreview();
+  });
 
 document.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("click", async () => {

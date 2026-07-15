@@ -252,6 +252,13 @@ main {
   accent-color: var(--primary);
 }
 
+.option-toggle-sub {
+  margin-left: 16px;
+  margin-top: -6px;
+  background: #f4f6f8;
+  font-size: 0.8rem;
+}
+
 .action-grid {
   display: flex;
   flex-direction: column;
