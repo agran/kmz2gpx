@@ -531,8 +531,17 @@ async function routeChunkInOneRequest(points) {
     const straight = haversineMeters(a, b);
     const leg = legs[i];
     const endpointOffTrail = offTrail[i] || offTrail[i + 1];
+    // A near-zero leg distance next to a much larger straight-line gap is
+    // not a real route \u2014 it means both waypoints were snapped to the same
+    // distant point because there's no path nearby (OSRM still reports
+    // code "Ok", just with a degenerate 0m leg). Waypoint snapping can
+    // legitimately make a real route a bit shorter than the original
+    // straight-line distance, so we only reject clearly degenerate legs,
+    // not merely "shorter than straight".
+    const isDegenerate = leg.distance < TRAIL_ROUTE_MIN_SEGMENT_METERS;
     const withinDeviation =
       straight >= TRAIL_ROUTE_MIN_SEGMENT_METERS &&
+      !isDegenerate &&
       leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO);
     let segmentPoints = [a, b];
     let usedTrail = false;
@@ -546,7 +555,8 @@ async function routeChunkInOneRequest(points) {
     console.log(
       `[OSRM]   Отрезок ${i + 1}/${legs.length}: прямая ${straight.toFixed(0)} м, ` +
         `по тропе ${leg.distance.toFixed(0)} м → ${usedTrail ? "используем тропу" : "используем прямую"}` +
-        (endpointOffTrail ? " (точка снята с тропы слишком далеко)" : ""),
+        (endpointOffTrail ? " (точка снята с тропы слишком далеко)" : "") +
+        (isDegenerate ? " (маршрут нулевой длины — путь не найден)" : ""),
     );
     segments.push({ points: segmentPoints, viaTrail: usedTrail });
   }
@@ -1217,8 +1227,7 @@ fileInput.addEventListener("change", async () => {
 
     state.points = state.points.concat(newPoints);
     state.tracks = state.tracks.concat(newTracks);
-    state.fileBaseName =
-      file.name.replace(/\.(kmz|kml|gpx)$/i, "") || "export";
+    state.fileBaseName = file.name.replace(/\.(kmz|kml|gpx)$/i, "") || "export";
 
     fileStatus.textContent = `Добавлено: ${tracks.length} трек(ов), ${points.length} точ(ек). Всего: ${state.tracks.length} трек(ов), ${state.points.length} точ(ек)`;
     renderLists();
