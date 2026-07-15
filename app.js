@@ -303,6 +303,12 @@ const TRAIL_ROUTING_URL =
 // the straight line between the two points; otherwise we fall back to a
 // straight segment (handles points placed off-trail).
 const TRAIL_ROUTE_MAX_DEVIATION_RATIO = 0.6;
+// If OSRM had to snap an input point more than this far to reach the
+// nearest routable path, that point is likely off-trail (in a field,
+// forest, building, etc.) — any leg touching it tends to include a
+// nonsensical detour just to reach/leave that point, so we skip the routed
+// geometry there and connect with a straight line instead.
+const TRAIL_WAYPOINT_SNAP_MAX_METERS = 50;
 // Skip routing very short hops — not worth the request, and avoids noise.
 const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
 // Minimum delay between requests to the free public routing service, so we
@@ -356,9 +362,15 @@ function legToPoints(leg) {
 }
 
 // Routes every point in a chunk in one HTTP request. OSRM returns one "leg"
-// per consecutive pair of waypoints, each with its own distance — so we can
-// still fall back to a straight line for individual hops that detour too
-// far, exactly as before, but from a single response instead of N requests.
+// per consecutive pair of waypoints, each with its own distance, plus one
+// "waypoint" entry per input point telling us how far it had to be snapped
+// to the nearest routable path. Combining both signals lets us pick which
+// hops to keep on the routed trail and which to straighten out:
+//   - a point snapped far away is treated as placed off-trail — the legs
+//     touching it fall back to a straight line;
+//   - otherwise a leg still falls back to a straight line if its routed
+//     length deviates too much from the direct distance (e.g. no direct
+//     path exists and OSRM loops far around).
 async function routeChunkInOneRequest(points) {
   const coordsParam = points.map((p) => `${p.lon},${p.lat}`).join(";");
   const url = `${TRAIL_ROUTING_URL}${coordsParam}?overview=false&geometries=geojson&steps=true`;
@@ -373,6 +385,11 @@ async function routeChunkInOneRequest(points) {
     throw new Error("No route found");
   }
 
+  const offTrail = (data.waypoints || []).map(
+    (wp) =>
+      !!wp && typeof wp.distance === "number" && wp.distance > TRAIL_WAYPOINT_SNAP_MAX_METERS,
+  );
+
   const legs = data.routes[0].legs || [];
   const result = [points[0]];
   for (let i = 0; i < legs.length; i++) {
@@ -380,8 +397,10 @@ async function routeChunkInOneRequest(points) {
     const b = points[i + 1];
     const straight = haversineMeters(a, b);
     const leg = legs[i];
+    const endpointOffTrail = offTrail[i] || offTrail[i + 1];
     let segmentPoints = [a, b];
     if (
+      !endpointOffTrail &&
       straight >= TRAIL_ROUTE_MIN_SEGMENT_METERS &&
       leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)
     ) {
