@@ -115,83 +115,13 @@
               точки
             </span>
           </label>
-          <div class="action-grid">
-            <div class="action-row">
-              <span class="action-label">Всё (треки + точки)</span>
-              <div class="action-buttons">
-                <button
-                  class="btn btn-primary"
-                  data-action="copy"
-                  data-scope="all"
-                >
-                  Копировать
-                </button>
-                <button class="btn" data-action="download" data-scope="all">
-                  Скачать .gpx
-                </button>
-              </div>
-            </div>
-
-            <div class="action-row">
-              <span class="action-label">Выбранные треки</span>
-              <div class="action-buttons">
-                <button
-                  class="btn btn-primary"
-                  data-action="copy"
-                  data-scope="tracks-selected"
-                >
-                  Копировать
-                </button>
-                <button
-                  class="btn"
-                  data-action="download"
-                  data-scope="tracks-selected"
-                >
-                  Скачать .gpx
-                </button>
-              </div>
-            </div>
-
-            <div class="action-row">
-              <span class="action-label">Все точки</span>
-              <div class="action-buttons">
-                <button
-                  class="btn btn-primary"
-                  data-action="copy"
-                  data-scope="points-all"
-                >
-                  Копировать
-                </button>
-                <button
-                  class="btn"
-                  data-action="download"
-                  data-scope="points-all"
-                >
-                  Скачать .gpx
-                </button>
-              </div>
-            </div>
-
-            <div class="action-row">
-              <span class="action-label">Выбранные точки</span>
-              <div class="action-buttons">
-                <button
-                  class="btn btn-primary"
-                  data-action="copy"
-                  data-scope="points-selected"
-                >
-                  Копировать
-                </button>
-                <button
-                  class="btn"
-                  data-action="download"
-                  data-scope="points-selected"
-                >
-                  Скачать .gpx
-                </button>
-              </div>
-            </div>
-          </div>
+          <p class="action-hint">
+            Скачивается выбранные выше треки и точки — чтобы скачать всё,
+            нажмите «Выбрать все» в списках выше.
+          </p>
+          <button class="btn btn-primary btn-full" id="download-btn">
+            Скачать .gpx
+          </button>
         </div>
 
         <div class="section-block">

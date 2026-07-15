@@ -283,35 +283,10 @@ main {
   accent-color: var(--primary);
 }
 
-.action-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.action-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.action-row:last-child {
-  border-bottom: none;
-}
-
-.action-label {
-  font-weight: 500;
-  flex: 1 1 160px;
-}
-
-.action-buttons {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+.action-hint {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .btn {
@@ -341,6 +316,10 @@ main {
 }
 
 .btn-secondary {
+  width: 100%;
+}
+
+.btn-full {
   width: 100%;
 }
 
@@ -374,16 +353,6 @@ main {
 }
 
 @media (max-width: 480px) {
-  .action-row {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .action-buttons {
-    width: 100%;
-  }
-  .action-buttons .btn {
-    flex: 1;
-  }
   .map-container {
     height: 240px;
   }

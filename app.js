@@ -379,81 +379,28 @@ function nextTrackId() {
     : 1;
 }
 
-function gpxForScope(scope) {
+// Exports whatever is currently selected: checked tracks plus checked
+// points (as a track if "points-as-track" is on, otherwise as waypoints).
+// The old separate "all / selected tracks / all points / selected points"
+// buttons are gone — the existing "Выбрать все"/"Снять все" controls in
+// the lists above are what decide the scope now.
+function buildExportGpx() {
   const asTrack = pointsAsTrackRequested();
-  switch (scope) {
-    case "all": {
-      if (asTrack) {
-        return buildTrackPointsForExport(state.points).then(({ points }) => {
-          const pointsTrack = pointsToTrack(points);
-          const tracks = pointsTrack
-            ? [...state.tracks, pointsTrack]
-            : state.tracks;
-          return buildGpx({ points, tracks });
-        });
-      }
-      return buildGpx({ points: state.points, tracks: state.tracks });
-    }
-    case "tracks-selected":
-      return buildGpx({ tracks: state.tracks.filter((t) => t.selected) });
-    case "points-all": {
-      if (asTrack) {
-        return buildTrackPointsForExport(state.points).then(({ points }) => {
-          const pointsTrack = pointsToTrack(points);
-          return buildGpx({ points, tracks: pointsTrack ? [pointsTrack] : [] });
-        });
-      }
-      return buildGpx({ points: state.points });
-    }
-    case "points-selected": {
-      const selected = state.points.filter((p) => p.selected);
-      if (asTrack) {
-        return buildTrackPointsForExport(selected).then(({ points }) => {
-          const pointsTrack = pointsToTrack(points);
-          return buildGpx({ points, tracks: pointsTrack ? [pointsTrack] : [] });
-        });
-      }
-      return buildGpx({ points: selected });
-    }
-    default:
-      return buildGpx({});
+  const selectedTracks = state.tracks.filter((t) => t.selected);
+  const selectedPoints = state.points.filter((p) => p.selected);
+  if (asTrack) {
+    return buildTrackPointsForExport(selectedPoints).then(({ points }) => {
+      const pointsTrack = pointsToTrack(points);
+      const tracks = pointsTrack
+        ? [...selectedTracks, pointsTrack]
+        : selectedTracks;
+      return buildGpx({ points, tracks });
+    });
   }
+  return buildGpx({ points: selectedPoints, tracks: selectedTracks });
 }
 
-function filenameForScope(scope) {
-  const map = {
-    all: "all",
-    "tracks-selected": "tracks-selected",
-    "points-all": "points-all",
-    "points-selected": "points-selected",
-  };
-  return `${state.fileBaseName}-${map[scope] || scope}.gpx`;
-}
-
-/* ---------- Clipboard / download ---------- */
-
-async function copyToClipboard(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      textarea.style.top = "0";
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    return true;
-  } catch (err) {
-    console.error(err);
-    return false;
-  }
-}
+/* ---------- Download ---------- */
 
 function downloadGpx(text, filename) {
   const blob = new Blob([text], { type: "application/gpx+xml" });
@@ -867,21 +814,10 @@ document.getElementById("map-drag-mode").addEventListener("change", () => {
   );
 });
 
-document.querySelectorAll("button[data-action]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const scope = btn.dataset.scope;
-    const gpx = await gpxForScope(scope);
-    if (btn.dataset.action === "copy") {
-      const ok = await copyToClipboard(gpx);
-      showToast(
-        ok ? "GPX скопирован в буфер обмена" : "Не удалось скопировать",
-        !ok,
-      );
-    } else if (btn.dataset.action === "download") {
-      downloadGpx(gpx, filenameForScope(scope));
-      showToast("Файл сохранён");
-    }
-  });
+document.getElementById("download-btn").addEventListener("click", async () => {
+  const gpx = await buildExportGpx();
+  downloadGpx(gpx, `${state.fileBaseName}.gpx`);
+  showToast("Файл сохранён");
 });
 
 document.getElementById("reset-btn").addEventListener("click", () => {
