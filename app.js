@@ -393,10 +393,36 @@ async function routeChunkInOneRequest(points) {
   return result;
 }
 
+// Tries to route the *entire* list of points in a single OSRM request first
+// (fastest, one HTTP call no matter how many points). Only if that single
+// big request fails outright (too many waypoints, timeout, service error)
+// do we fall back to splitting into smaller chunks.
 async function routePointsViaTrails(points) {
   if (points.length < 2) return points.slice();
   trailRoutingRateLimited = false;
 
+  try {
+    return await routeChunkInOneRequest(points);
+  } catch (err) {
+    if (trailRoutingRateLimited) {
+      showToast(
+        "Сервис маршрутов по тропам временно ограничил запросы — точки соединены напрямую",
+        true,
+      );
+      return points.slice();
+    }
+    console.warn(
+      "Не удалось построить единый маршрут по тропам для всех точек, пробуем частями:",
+      err,
+    );
+    return routePointsViaTrailsChunked(points);
+  }
+}
+
+// Fallback used only when the single all-points request above fails: routes
+// the points in smaller overlapping chunks so one oversized/unreachable
+// request doesn't block routing entirely.
+async function routePointsViaTrailsChunked(points) {
   const chunks = chunkPointsForRouting(
     points,
     TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST,
