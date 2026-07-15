@@ -395,16 +395,38 @@ function pointsRouteViaTrailsRequested() {
 // between two points along real trails/paths/roads.
 const TRAIL_ROUTING_URL =
   "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
+// Defaults used if the tuning inputs below are missing/invalid. Real hiking
+// trails (switchbacks, sparsely-mapped mountain paths) often need much more
+// slack than a city street grid, so these are intentionally generous.
+const TRAIL_ROUTE_MAX_DEVIATION_RATIO_DEFAULT = 1.5; // up to 150% longer than straight
+const TRAIL_WAYPOINT_SNAP_MAX_METERS_DEFAULT = 80;
+
 // A routed detour is only used if it isn't more than this much longer than
 // the straight line between the two points; otherwise we fall back to a
-// straight segment (handles points placed off-trail).
-const TRAIL_ROUTE_MAX_DEVIATION_RATIO = 0.6;
+// straight segment (handles points placed off-trail). Adjustable via the
+// "Допустимое отклонение" input in the UI.
+function trailMaxDeviationRatio() {
+  const input = document.getElementById("trail-max-deviation");
+  const percent = input ? parseFloat(input.value) : NaN;
+  return Number.isFinite(percent) && percent >= 0
+    ? percent / 100
+    : TRAIL_ROUTE_MAX_DEVIATION_RATIO_DEFAULT;
+}
+
 // If OSRM had to snap an input point more than this far to reach the
 // nearest routable path, that point is likely off-trail (in a field,
 // forest, building, etc.) — any leg touching it tends to include a
 // nonsensical detour just to reach/leave that point, so we skip the routed
-// geometry there and connect with a straight line instead.
-const TRAIL_WAYPOINT_SNAP_MAX_METERS = 50;
+// geometry there and connect with a straight line instead. Adjustable via
+// the "Макс. расстояние привязки" input in the UI.
+function trailWaypointSnapMaxMeters() {
+  const input = document.getElementById("trail-snap-max-meters");
+  const meters = input ? parseFloat(input.value) : NaN;
+  return Number.isFinite(meters) && meters >= 0
+    ? meters
+    : TRAIL_WAYPOINT_SNAP_MAX_METERS_DEFAULT;
+}
+
 // Skip routing very short hops — not worth the request, and avoids noise.
 const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
 // Minimum delay between requests to the free public routing service, so we
@@ -516,11 +538,11 @@ async function routeChunkInOneRequest(points) {
     (wp) =>
       !!wp &&
       typeof wp.distance === "number" &&
-      wp.distance > TRAIL_WAYPOINT_SNAP_MAX_METERS,
+      wp.distance > trailWaypointSnapMaxMeters(),
   );
   console.log(
     `[OSRM] Успех: код "${data.code}", ${data.waypoints ? data.waypoints.length : 0} waypoints, ` +
-      `${offTrail.filter(Boolean).length} из них похоже не на тропе (snap > ${TRAIL_WAYPOINT_SNAP_MAX_METERS} м)`,
+      `${offTrail.filter(Boolean).length} из них похоже не на тропе (snap > ${trailWaypointSnapMaxMeters()} м)`,
   );
 
   const legs = data.routes[0].legs || [];
@@ -542,7 +564,7 @@ async function routeChunkInOneRequest(points) {
     const withinDeviation =
       straight >= TRAIL_ROUTE_MIN_SEGMENT_METERS &&
       !isDegenerate &&
-      leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO);
+      leg.distance <= straight * (1 + trailMaxDeviationRatio());
     let segmentPoints = [a, b];
     let usedTrail = false;
     if (!endpointOffTrail && withinDeviation) {
@@ -1155,6 +1177,18 @@ document
 
 document
   .getElementById("points-route-via-trails")
+  .addEventListener("change", () => {
+    updatePointsTrackPreview();
+  });
+
+document
+  .getElementById("trail-max-deviation")
+  .addEventListener("change", () => {
+    updatePointsTrackPreview();
+  });
+
+document
+  .getElementById("trail-snap-max-meters")
   .addEventListener("change", () => {
     updatePointsTrackPreview();
   });

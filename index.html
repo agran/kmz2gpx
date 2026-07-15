@@ -129,6 +129,20 @@
               занять время)
             </span>
           </label>
+          <div class="trail-tuning">
+            <label>
+              Допустимое отклонение от прямой, %
+              <input type="number" id="trail-max-deviation" min="0" max="1000" step="10" value="150" />
+            </label>
+            <label>
+              Макс. расстояние привязки точки к тропе, м
+              <input type="number" id="trail-snap-max-meters" min="0" max="2000" step="10" value="80" />
+            </label>
+            <p class="trail-tuning-hint">
+              Для горных троп с серпантинами и разреженной картой OSM
+              значения можно увеличить, чтобы маршрут строился по тропе чаще.
+            </p>
+          </div>
           <div class="action-grid">
             <div class="action-row">
               <span class="action-label">Всё (треки + точки)</span>
