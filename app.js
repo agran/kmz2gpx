@@ -297,7 +297,8 @@ function pointsRouteViaTrailsRequested() {
 
 // Public FOSSGIS OSRM instance (no API key required) used to try to route
 // between two points along real trails/paths/roads.
-const TRAIL_ROUTING_URL = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
+const TRAIL_ROUTING_URL =
+  "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
 // A routed detour is only used if it isn't more than this much longer than
 // the straight line between the two points; otherwise we fall back to a
 // straight segment (handles points placed off-trail).
@@ -490,6 +491,11 @@ function mapClickAddModeRequested() {
   return !!(checkbox && checkbox.checked);
 }
 
+function mapDragModeRequested() {
+  const checkbox = document.getElementById("map-drag-mode");
+  return !!(checkbox && checkbox.checked);
+}
+
 function ensureMap() {
   if (map) return map;
   map = L.map("map", { scrollWheelZoom: true });
@@ -514,22 +520,16 @@ function trackStyle(selected) {
     : { color: "#9aa5b1", weight: 3, opacity: 0.6, dashArray: "4 6" };
 }
 
-function pointStyle(selected) {
-  return selected
-    ? {
-        radius: 7,
-        color: "#1d4ed8",
-        weight: 2,
-        fillColor: "#2563eb",
-        fillOpacity: 0.9,
-      }
-    : {
-        radius: 5,
-        color: "#8b93a1",
-        weight: 1,
-        fillColor: "#c3c9d1",
-        fillOpacity: 0.6,
-      };
+function pointDivIcon(selected) {
+  const size = selected ? 18 : 14;
+  const fill = selected ? "#2563eb" : "#c3c9d1";
+  const border = selected ? "#1d4ed8" : "#8b93a1";
+  return L.divIcon({
+    className: "point-marker-icon",
+    html: `<span style="display:block;width:${size}px;height:${size}px;border-radius:50%;background:${fill};border:2px solid ${border};box-shadow:0 0 0 1px rgba(255,255,255,.7);"></span>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
 }
 
 function updatePointsTrackPreview() {
@@ -580,14 +580,23 @@ function togglePointSelection(id) {
 }
 
 function createPointMarker(point) {
-  const marker = L.circleMarker(
-    [point.lat, point.lon],
-    pointStyle(point.selected),
-  );
+  const marker = L.marker([point.lat, point.lon], {
+    icon: pointDivIcon(point.selected),
+    draggable: true,
+    autoPan: true,
+  });
+  if (!mapDragModeRequested()) marker.dragging.disable();
   marker.bindTooltip(escapeXml(point.name));
   marker.on("click", (e) => {
     L.DomEvent.stopPropagation(e);
     togglePointSelection(point.id);
+  });
+  marker.on("dragend", () => {
+    const latlng = marker.getLatLng();
+    point.lat = latlng.lat;
+    point.lon = latlng.lng;
+    renderLists();
+    updatePointsTrackPreview();
   });
   return marker;
 }
@@ -667,7 +676,7 @@ function updateMapStyles() {
   }
   for (const point of state.points) {
     const marker = pointLayerById[point.id];
-    if (marker) marker.setStyle(pointStyle(point.selected));
+    if (marker) marker.setIcon(pointDivIcon(point.selected));
   }
 }
 
@@ -773,28 +782,18 @@ document
     updatePointsTrackPreview();
   });
 
-document.getElementById("manual-point-add").addEventListener("click", () => {
-  const nameInput = document.getElementById("manual-point-name");
-  const latInput = document.getElementById("manual-point-lat");
-  const lonInput = document.getElementById("manual-point-lon");
-  const lat = parseFloat(latInput.value.replace(",", "."));
-  const lon = parseFloat(lonInput.value.replace(",", "."));
-  if (
-    !Number.isFinite(lat) ||
-    !Number.isFinite(lon) ||
-    lat < -90 ||
-    lat > 90 ||
-    lon < -180 ||
-    lon > 180
-  ) {
-    showToast("Введите корректные широту и долготу", true);
-    return;
+document.getElementById("map-drag-mode").addEventListener("change", () => {
+  const enabled = mapDragModeRequested();
+  for (const marker of Object.values(pointLayerById)) {
+    if (!marker.dragging) continue;
+    if (enabled) marker.dragging.enable();
+    else marker.dragging.disable();
   }
-  addManualPoint(lat, lon, nameInput.value);
-  nameInput.value = "";
-  latInput.value = "";
-  lonInput.value = "";
-  showToast("Точка добавлена");
+  showToast(
+    enabled
+      ? "Перетаскивание точек включено"
+      : "Перетаскивание точек выключено",
+  );
 });
 
 document.querySelectorAll("button[data-action]").forEach((btn) => {

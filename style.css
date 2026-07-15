@@ -110,33 +110,6 @@ main {
   margin: 0 0 10px;
 }
 
-.manual-add-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.manual-add-fields input[type="text"] {
-  flex: 1 1 140px;
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.9rem;
-  min-height: 40px;
-}
-
-.manual-add-fields .btn {
-  flex: 1 1 100%;
-}
-
-@media (min-width: 560px) {
-  .manual-add-fields .btn {
-    flex: 0 0 auto;
-  }
-}
-
 .section-block {
   margin-bottom: 22px;
 }
