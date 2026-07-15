@@ -388,8 +388,10 @@ function updatePointsTrackPreview() {
     mapLayerGroup.removeLayer(pointsTrackPreviewLine);
     pointsTrackPreviewLine = null;
   }
-  if (!pointsAsTrackRequested() || state.points.length < 2) return;
-  const latlngs = state.points.map((p) => [p.lat, p.lon]);
+  if (!pointsAsTrackRequested()) return;
+  const selectedPoints = state.points.filter((p) => p.selected);
+  if (selectedPoints.length < 2) return;
+  const latlngs = selectedPoints.map((p) => [p.lat, p.lon]);
   pointsTrackPreviewLine = L.polyline(latlngs, {
     color: "#16a34a",
     weight: 4,
@@ -397,7 +399,7 @@ function updatePointsTrackPreview() {
     dashArray: "2 8",
   });
   pointsTrackPreviewLine.bindTooltip(
-    "Предпросмотр маршрута из точек (как будет в GPX)",
+    "Предпросмотр маршрута из выбранных точек",
   );
   pointsTrackPreviewLine.addTo(mapLayerGroup);
   pointsTrackPreviewLine.bringToBack();
@@ -417,6 +419,7 @@ function togglePointSelection(id) {
   point.selected = !point.selected;
   renderLists();
   updateMapStyles();
+  updatePointsTrackPreview();
 }
 
 function renderMap() {
@@ -537,6 +540,7 @@ pointsList.addEventListener("change", (e) => {
     const point = state.points.find((p) => p.id === id);
     if (point) point.selected = target.checked;
     updateMapStyles();
+    updatePointsTrackPreview();
   }
 });
 
@@ -554,11 +558,13 @@ document.getElementById("points-select-all").addEventListener("click", () => {
   state.points.forEach((p) => (p.selected = true));
   renderLists();
   updateMapStyles();
+  updatePointsTrackPreview();
 });
 document.getElementById("points-select-none").addEventListener("click", () => {
   state.points.forEach((p) => (p.selected = false));
   renderLists();
   updateMapStyles();
+  updatePointsTrackPreview();
 });
 
 document.getElementById("points-as-track").addEventListener("change", () => {

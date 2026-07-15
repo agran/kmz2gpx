@@ -1,4 +1,4 @@
-const CACHE_NAME = "kmz2gpx-v2";
+const CACHE_NAME = "kmz2gpx-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -28,18 +28,46 @@ self.addEventListener("activate", (event) => {
       .keys()
       .then((keys) =>
         Promise.all(
-          keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)),
+          keys
+            .filter((key) => key !== CACHE_NAME)
+            .map((key) => caches.delete(key)),
         ),
       ),
   );
   self.clients.claim();
 });
 
-// Stale-while-revalidate: serve from cache instantly if available, refresh in
-// the background. Falls back to cache when the network is unavailable, which
-// keeps the app shell, JSZip/Leaflet and already-seen map tiles usable offline.
+// Core app files (HTML/JS/CSS) use network-first, so a new deploy is picked up
+// immediately when online, with cache as an offline fallback. Everything else
+// (Leaflet/JSZip vendor files, icons, map tiles) uses stale-while-revalidate,
+// serving instantly from cache while refreshing in the background.
+const CORE_FILES = new Set(["", "index.html", "app.js", "style.css"]);
+
+function isCoreRequest(request) {
+  if (request.mode === "navigate") return true;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return false;
+  const fileName = url.pathname.split("/").pop();
+  return CORE_FILES.has(fileName);
+}
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+
+  if (isCoreRequest(event.request)) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request)),
+    );
+    return;
+  }
 
   event.respondWith(
     caches.match(event.request).then((cached) => {
@@ -47,7 +75,9 @@ self.addEventListener("fetch", (event) => {
         .then((response) => {
           if (response && response.status === 200) {
             const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            caches
+              .open(CACHE_NAME)
+              .then((cache) => cache.put(event.request, clone));
           }
           return response;
         })
