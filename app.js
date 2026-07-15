@@ -630,3 +630,13 @@ fileInput.addEventListener("change", async () => {
     fileStatus.textContent = err.message || "Ошибка при обработке файла";
   }
 });
+
+/* ---------- PWA install / offline support ---------- */
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("sw.js")
+      .catch((err) => console.error("Ошибка регистрации service worker:", err));
+  });
+}
