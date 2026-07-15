@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>KMZ → GPX конвертер</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>KMZ → GPX конвертер</h1>
+      <p class="subtitle">
+        Загрузите KMZ или KML файл, выберите треки и точки, скопируйте или
+        скачайте результат в формате GPX.
+      </p>
+    </header>
+
+    <main>
+      <section class="card" id="upload-card">
+        <label class="file-drop" id="file-drop">
+          <input
+            type="file"
+            id="file-input"
+            accept=".kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml"
+          />
+          <span id="file-drop-text">Нажмите, чтобы выбрать KMZ/KML файл</span>
+        </label>
+        <p id="file-status" class="file-status"></p>
+      </section>
+
+      <section class="card hidden" id="result-card">
+        <div class="section-block">
+          <h2>Карта</h2>
+          <p class="map-hint">
+            Нажмите на трек или точку на карте, чтобы выбрать/снять выбор.
+            Выбранное — синим, невыбранное — серым.
+          </p>
+          <div id="map" class="map-container"></div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-header">
+            <h2>Треки <span class="count-badge" id="tracks-count">0</span></h2>
+            <div class="header-actions">
+              <button class="btn-link" id="tracks-select-all">
+                Выбрать все
+              </button>
+              <button class="btn-link" id="tracks-select-none">
+                Снять все
+              </button>
+            </div>
+          </div>
+          <ul class="item-list" id="tracks-list"></ul>
+          <p class="empty-hint" id="tracks-empty">Треки не найдены</p>
+        </div>
+
+        <div class="section-block">
+          <div class="section-header">
+            <h2>Точки <span class="count-badge" id="points-count">0</span></h2>
+            <div class="header-actions">
+              <button class="btn-link" id="points-select-all">
+                Выбрать все
+              </button>
+              <button class="btn-link" id="points-select-none">
+                Снять все
+              </button>
+            </div>
+          </div>
+          <ul class="item-list" id="points-list"></ul>
+          <p class="empty-hint" id="points-empty">Точки не найдены</p>
+        </div>
+
+        <div class="section-block">
+          <h2>Действия</h2>
+          <label class="option-toggle">
+            <input type="checkbox" id="points-as-track" />
+            <span>
+              Экспортировать точки как маршрут (трек), а не waypoints — нужно
+              для Zepp и других приложений, которые не импортируют одиночные
+              точки
+            </span>
+          </label>
+          <div class="action-grid">
+            <div class="action-row">
+              <span class="action-label">Всё (треки + точки)</span>
+              <div class="action-buttons">
+                <button
+                  class="btn btn-primary"
+                  data-action="copy"
+                  data-scope="all"
+                >
+                  Копировать
+                </button>
+                <button class="btn" data-action="download" data-scope="all">
+                  Скачать .gpx
+                </button>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <span class="action-label">Выбранные треки</span>
+              <div class="action-buttons">
+                <button
+                  class="btn btn-primary"
+                  data-action="copy"
+                  data-scope="tracks-selected"
+                >
+                  Копировать
+                </button>
+                <button
+                  class="btn"
+                  data-action="download"
+                  data-scope="tracks-selected"
+                >
+                  Скачать .gpx
+                </button>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <span class="action-label">Все точки</span>
+              <div class="action-buttons">
+                <button
+                  class="btn btn-primary"
+                  data-action="copy"
+                  data-scope="points-all"
+                >
+                  Копировать
+                </button>
+                <button
+                  class="btn"
+                  data-action="download"
+                  data-scope="points-all"
+                >
+                  Скачать .gpx
+                </button>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <span class="action-label">Выбранные точки</span>
+              <div class="action-buttons">
+                <button
+                  class="btn btn-primary"
+                  data-action="copy"
+                  data-scope="points-selected"
+                >
+                  Копировать
+                </button>
+                <button
+                  class="btn"
+                  data-action="download"
+                  data-scope="points-selected"
+                >
+                  Скачать .gpx
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <button class="btn btn-secondary" id="reset-btn">
+            Загрузить другой файл
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
