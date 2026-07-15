@@ -428,7 +428,7 @@ async function routeChunkInOneRequest(points) {
   );
 
   const legs = data.routes[0].legs || [];
-  const result = [points[0]];
+  const segments = [];
   for (let i = 0; i < legs.length; i++) {
     const a = points[i];
     const b = points[i + 1];
@@ -452,8 +452,21 @@ async function routeChunkInOneRequest(points) {
         `по тропе ${leg.distance.toFixed(0)} м → ${usedTrail ? "используем тропу" : "используем прямую"}` +
         (endpointOffTrail ? " (точка снята с тропы слишком далеко)" : ""),
     );
-    for (let j = 1; j < segmentPoints.length; j++)
-      result.push(segmentPoints[j]);
+    segments.push({ points: segmentPoints, viaTrail: usedTrail });
+  }
+  return segments;
+}
+
+// Concatenates an ordered list of {points, viaTrail} segments into a single
+// flat point list, dropping the duplicate boundary point shared by
+// consecutive segments.
+function flattenSegments(segments) {
+  const result = [];
+  for (const seg of segments) {
+    for (let i = 0; i < seg.points.length; i++) {
+      if (i === 0 && result.length) continue;
+      result.push(seg.points[i]);
+    }
   }
   return result;
 }
@@ -463,18 +476,18 @@ async function routeChunkInOneRequest(points) {
 // big request fails outright (too many waypoints, timeout, service error)
 // do we fall back to splitting into smaller chunks.
 async function routePointsViaTrails(points) {
-  if (points.length < 2) return points.slice();
+  if (points.length < 2) return [{ points: points.slice(), viaTrail: null }];
   trailRoutingRateLimited = false;
 
   console.log(
     `[OSRM] Прокладываем маршрут для ${points.length} точек одним запросом...`,
   );
   try {
-    const routed = await routeChunkInOneRequest(points);
+    const segments = await routeChunkInOneRequest(points);
     console.log(
-      `[OSRM] Готово: единый запрос успешен, итогово точек в маршруте: ${routed.length}`,
+      `[OSRM] Готово: единый запрос успешен, отрезков: ${segments.length}`,
     );
-    return routed;
+    return segments;
   } catch (err) {
     if (trailRoutingRateLimited) {
       console.warn(
@@ -484,7 +497,7 @@ async function routePointsViaTrails(points) {
         "Сервис маршрутов по тропам временно ограничил запросы — точки соединены напрямую",
         true,
       );
-      return points.slice();
+      return [{ points: points.slice(), viaTrail: false }];
     }
     console.warn(
       "[OSRM] Единый запрос со всеми точками не удался, пробуем частями:",
@@ -505,7 +518,7 @@ async function routePointsViaTrailsChunked(points) {
   console.log(
     `[OSRM] Разбиваем на ${chunks.length} запрос(а) по ${TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST} точек`,
   );
-  const result = [points[0]];
+  const allSegments = [];
 
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c];
@@ -513,12 +526,12 @@ async function routePointsViaTrailsChunked(points) {
       console.warn(
         `[OSRM] Пропуск части ${c + 1}/${chunks.length} — уже ограничены (429)`,
       );
-      for (let j = 1; j < chunk.length; j++) result.push(chunk[j]);
+      allSegments.push({ points: chunk, viaTrail: false });
       continue;
     }
     try {
-      const routedChunk = await routeChunkInOneRequest(chunk);
-      for (let j = 1; j < routedChunk.length; j++) result.push(routedChunk[j]);
+      const chunkSegments = await routeChunkInOneRequest(chunk);
+      allSegments.push(...chunkSegments);
     } catch (err) {
       if (!trailRoutingRateLimited) {
         console.warn(
@@ -526,7 +539,7 @@ async function routePointsViaTrailsChunked(points) {
           err,
         );
       }
-      for (let j = 1; j < chunk.length; j++) result.push(chunk[j]);
+      allSegments.push({ points: chunk, viaTrail: false });
     }
     if (c < chunks.length - 1 && !trailRoutingRateLimited) {
       await sleep(TRAIL_ROUTE_REQUEST_DELAY_MS);
@@ -539,20 +552,24 @@ async function routePointsViaTrailsChunked(points) {
       true,
     );
   }
-  return result;
+  return allSegments;
 }
 
 async function buildTrackPointsForExport(points) {
   const ordered = maybeOrderByProximity(points);
   if (pointsRouteViaTrailsRequested()) {
     try {
-      return await routePointsViaTrails(ordered);
+      const segments = await routePointsViaTrails(ordered);
+      return { points: flattenSegments(segments), segments };
     } catch (err) {
       console.error("Не удалось проложить маршрут по тропам:", err);
-      return ordered;
+      return {
+        points: ordered,
+        segments: [{ points: ordered, viaTrail: false }],
+      };
     }
   }
-  return ordered;
+  return { points: ordered, segments: [{ points: ordered, viaTrail: null }] };
 }
 
 function pointsToTrack(points, name) {
@@ -583,8 +600,8 @@ function gpxForScope(scope) {
   switch (scope) {
     case "all": {
       if (asTrack) {
-        return buildTrackPointsForExport(state.points).then((ordered) => {
-          const pointsTrack = pointsToTrack(ordered);
+        return buildTrackPointsForExport(state.points).then(({ points }) => {
+          const pointsTrack = pointsToTrack(points);
           const tracks = pointsTrack
             ? [...state.tracks, pointsTrack]
             : state.tracks;
@@ -597,8 +614,8 @@ function gpxForScope(scope) {
       return buildGpx({ tracks: state.tracks.filter((t) => t.selected) });
     case "points-all": {
       if (asTrack) {
-        return buildTrackPointsForExport(state.points).then((ordered) => {
-          const pointsTrack = pointsToTrack(ordered);
+        return buildTrackPointsForExport(state.points).then(({ points }) => {
+          const pointsTrack = pointsToTrack(points);
           return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
         });
       }
@@ -607,8 +624,8 @@ function gpxForScope(scope) {
     case "points-selected": {
       const selected = state.points.filter((p) => p.selected);
       if (asTrack) {
-        return buildTrackPointsForExport(selected).then((ordered) => {
-          const pointsTrack = pointsToTrack(ordered);
+        return buildTrackPointsForExport(selected).then(({ points }) => {
+          const pointsTrack = pointsToTrack(points);
           return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
         });
       }
@@ -672,7 +689,7 @@ let map = null;
 let mapLayerGroup = null;
 let trackLayerById = {};
 let pointLayerById = {};
-let pointsTrackPreviewLine = null;
+let pointsTrackPreviewLayers = [];
 let previewRequestToken = 0;
 
 function mapClickAddModeRequested() {
@@ -721,33 +738,59 @@ function pointDivIcon(selected) {
   });
 }
 
+function previewSegmentStyle(viaTrail) {
+  if (viaTrail === true) {
+    // Successfully routed along a real trail/path.
+    return { color: "#16a34a", weight: 4, opacity: 0.9 };
+  }
+  if (viaTrail === false) {
+    // Routing was attempted for this hop but rejected (off-trail point or
+    // too big a detour) — connected with a plain straight line instead.
+    return { color: "#f59e0b", weight: 4, opacity: 0.85, dashArray: "2 8" };
+  }
+  // Routing wasn't requested at all — just a plain order preview.
+  return { color: "#16a34a", weight: 4, opacity: 0.85, dashArray: "2 8" };
+}
+
+function previewSegmentTooltip(viaTrail) {
+  if (viaTrail === true) return "По тропе";
+  if (viaTrail === false) return "Напрямую (тропа не найдена или точка не на тропе)";
+  return "Предпросмотр маршрута из выбранных точек";
+}
+
+function clearPointsTrackPreview() {
+  if (mapLayerGroup) {
+    for (const layer of pointsTrackPreviewLayers) {
+      mapLayerGroup.removeLayer(layer);
+    }
+  }
+  pointsTrackPreviewLayers = [];
+}
+
 function updatePointsTrackPreview() {
   const myToken = ++previewRequestToken;
   if (!mapLayerGroup) return;
-  if (pointsTrackPreviewLine) {
-    mapLayerGroup.removeLayer(pointsTrackPreviewLine);
-    pointsTrackPreviewLine = null;
-  }
+  clearPointsTrackPreview();
   if (!pointsAsTrackRequested()) return;
   const selectedPoints = state.points.filter((p) => p.selected);
   if (selectedPoints.length < 2) return;
 
   Promise.resolve(buildTrackPointsForExport(selectedPoints))
-    .catch(() => maybeOrderByProximity(selectedPoints))
-    .then((orderedPoints) => {
+    .catch(() => {
+      const ordered = maybeOrderByProximity(selectedPoints);
+      return { points: ordered, segments: [{ points: ordered, viaTrail: null }] };
+    })
+    .then(({ segments }) => {
       if (myToken !== previewRequestToken || !mapLayerGroup) return;
-      const latlngs = orderedPoints.map((p) => [p.lat, p.lon]);
-      pointsTrackPreviewLine = L.polyline(latlngs, {
-        color: "#16a34a",
-        weight: 4,
-        opacity: 0.85,
-        dashArray: "2 8",
-      });
-      pointsTrackPreviewLine.bindTooltip(
-        "Предпросмотр маршрута из выбранных точек",
-      );
-      pointsTrackPreviewLine.addTo(mapLayerGroup);
-      pointsTrackPreviewLine.bringToBack();
+      for (const seg of segments) {
+        if (seg.points.length < 2) continue;
+        const latlngs = seg.points.map((p) => [p.lat, p.lon]);
+        const line = L.polyline(latlngs, previewSegmentStyle(seg.viaTrail));
+        line.bindTooltip(previewSegmentTooltip(seg.viaTrail));
+        line.addTo(mapLayerGroup);
+        line.bringToBack();
+        pointsTrackPreviewLayers.push(line);
+      }
     });
 }
 
@@ -860,7 +903,7 @@ function renderMap() {
     mapInstance.setView([20, 0], 2);
   }
 
-  pointsTrackPreviewLine = null;
+  pointsTrackPreviewLayers = [];
   updatePointsTrackPreview();
 }
 
