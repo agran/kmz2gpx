@@ -386,202 +386,8 @@ function maybeOrderByProximity(points) {
     : points;
 }
 
-function pointsRouteViaTrailsRequested() {
-  const checkbox = document.getElementById("points-route-via-trails");
-  return !!(checkbox && checkbox.checked);
-}
-
-// Public BRouter instance (no API key required). Unlike a generic
-// road/foot-routing profile, BRouter's hiking profiles are built
-// specifically for hiking/mountaineering and route *through*
-// sac_scale-tagged trails (marked, demanding, alpine hiking) instead of
-// avoiding them.
-const TRAIL_ROUTING_URL = "https://brouter.de/brouter";
-const TRAIL_ROUTING_PROFILE = "hiking-mountain";
-// Default used if the tuning input below is missing/invalid. Real hiking
-// trails (switchbacks, sparsely-mapped mountain paths) often need much more
-// slack than a city street grid, so this is intentionally generous.
-const TRAIL_ROUTE_MAX_DEVIATION_RATIO_DEFAULT = 1.5; // up to 150% longer than straight
-
-// A routed detour is only used if it isn't more than this much longer than
-// the straight line between the two points; otherwise we fall back to a
-// straight segment (handles points placed off-trail or with no nearby
-// trail at all). Adjustable via the "Допустимое отклонение" input in the UI.
-function trailMaxDeviationRatio() {
-  const input = document.getElementById("trail-max-deviation");
-  const percent = input ? parseFloat(input.value) : NaN;
-  return Number.isFinite(percent) && percent >= 0
-    ? percent / 100
-    : TRAIL_ROUTE_MAX_DEVIATION_RATIO_DEFAULT;
-}
-
-// Skip routing very short hops — not worth the request, and avoids noise.
-const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
-// BRouter's public server answers a handful of via-points quickly, but gets
-// impractically slow (or never responds) with dozens+ points in one
-// request, so we route one hop (two points) per request rather than
-// combining everything into one call, with a small delay between requests
-// to stay polite to the free public server, and a timeout so a stuck
-// request falls back to a straight line instead of hanging forever.
-const TRAIL_ROUTE_REQUEST_DELAY_MS = 300;
-const TRAIL_ROUTE_REQUEST_TIMEOUT_MS = 15000;
-// Set for the duration of a single routePointsViaTrails() run once the
-// service starts responding with 429/503, so we stop sending more requests
-// and just fall back to straight lines for the remaining hops.
-let trailRoutingRateLimited = false;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Routes a single hop (two points) via BRouter's hiking-mountain profile.
-async function fetchBrouterSegment(a, b) {
-  const lonlats = `${a.lon},${a.lat}|${b.lon},${b.lat}`;
-  const url = `${TRAIL_ROUTING_URL}?lonlats=${lonlats}&profile=${TRAIL_ROUTING_PROFILE}&alternativeidx=0&format=geojson`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    TRAIL_ROUTE_REQUEST_TIMEOUT_MS,
-  );
-
-  console.log(`[BRouter] Запрос:`, url);
-  let response;
-  try {
-    response = await fetch(url, { signal: controller.signal });
-  } catch (err) {
-    console.warn("[BRouter] Запрос не выполнен (сеть/таймаут):", err);
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-  console.log(
-    `[BRouter] Ответ сервера: HTTP ${response.status} ${response.statusText}`,
-  );
-
-  if (response.status === 429 || response.status === 503) {
-    trailRoutingRateLimited = true;
-    console.warn(
-      `[BRouter] Сервис перегружен/ограничил запросы (HTTP ${response.status}) — дальнейшие запросы в этом прогоне отменяются`,
-    );
-    throw new Error(`BRouter rate limit (${response.status})`);
-  }
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    console.warn(
-      `[BRouter] Запрос отклонён: HTTP ${response.status}`,
-      bodyText.slice(0, 300),
-    );
-    throw new Error("BRouter request failed");
-  }
-
-  const data = await response.json();
-  const feature = data.features && data.features[0];
-  if (!feature || !feature.geometry || !feature.geometry.coordinates) {
-    console.warn("[BRouter] Пустой ответ, маршрут не найден", data);
-    throw new Error("No route found");
-  }
-  const distance = parseFloat(
-    feature.properties && feature.properties["track-length"],
-  );
-  const points = feature.geometry.coordinates.map(([lon, lat]) => ({
-    lat,
-    lon,
-    ele: 0,
-    time: null,
-  }));
-  return { distance: Number.isFinite(distance) ? distance : null, points };
-}
-
-// Routes a single hop between two points, falling back to a straight line
-// if BRouter fails/times out or the result deviates too much from the
-// direct distance (e.g. genuinely no trail nearby).
-async function routeSegmentViaTrail(a, b) {
-  const straight = haversineMeters(a, b);
-  if (straight < TRAIL_ROUTE_MIN_SEGMENT_METERS || trailRoutingRateLimited) {
-    return { points: [a, b], viaTrail: false };
-  }
-  try {
-    const { distance, points } = await fetchBrouterSegment(a, b);
-    const isDegenerate =
-      distance === null || distance < TRAIL_ROUTE_MIN_SEGMENT_METERS;
-    const withinDeviation =
-      !isDegenerate && distance <= straight * (1 + trailMaxDeviationRatio());
-    const usedTrail = withinDeviation && points.length >= 2;
-    console.log(
-      `[BRouter]   Отрезок: прямая ${straight.toFixed(0)} м, по тропе ` +
-        `${distance != null ? distance.toFixed(0) : "?"} м → ` +
-        `${usedTrail ? "используем тропу" : "используем прямую"}` +
-        (isDegenerate ? " (маршрут нулевой длины — путь не найден)" : ""),
-    );
-    if (usedTrail) return { points, viaTrail: true };
-  } catch (err) {
-    console.warn("[BRouter] Не удалось проложить отрезок:", err);
-  }
-  return { points: [a, b], viaTrail: false };
-}
-
-// Concatenates an ordered list of {points, viaTrail} segments into a single
-// flat point list, dropping the duplicate boundary point shared by
-// consecutive segments.
-function flattenSegments(segments) {
-  const result = [];
-  for (const seg of segments) {
-    for (let i = 0; i < seg.points.length; i++) {
-      if (i === 0 && result.length) continue;
-      result.push(seg.points[i]);
-    }
-  }
-  return result;
-}
-
-// Routes every hop sequentially via BRouter (one request per pair of
-// points, with a small delay between requests to stay polite to the free
-// public server), falling back to straight lines wherever routing fails or
-// deviates too far from the direct distance.
-async function routePointsViaTrails(points) {
-  if (points.length < 2) return [{ points: points.slice(), viaTrail: null }];
-  trailRoutingRateLimited = false;
-
-  console.log(
-    `[BRouter] Прокладываем маршрут для ${points.length} точек (профиль "${TRAIL_ROUTING_PROFILE}")...`,
-  );
-  const segments = [];
-  for (let i = 0; i < points.length - 1; i++) {
-    const segment = await routeSegmentViaTrail(points[i], points[i + 1]);
-    segments.push(segment);
-    if (i < points.length - 2 && !trailRoutingRateLimited) {
-      await sleep(TRAIL_ROUTE_REQUEST_DELAY_MS);
-    }
-  }
-
-  if (trailRoutingRateLimited) {
-    showToast(
-      "Сервис маршрутов по тропам временно перегружен — часть точек соединена напрямую",
-      true,
-    );
-  }
-  const viaTrailCount = segments.filter((s) => s.viaTrail).length;
-  console.log(
-    `[BRouter] Готово: ${viaTrailCount}/${segments.length} отрезков проложено по тропе`,
-  );
-  return segments;
-}
-
 async function buildTrackPointsForExport(points) {
-  const ordered = maybeOrderByProximity(points);
-  if (pointsRouteViaTrailsRequested()) {
-    try {
-      const segments = await routePointsViaTrails(ordered);
-      return { points: flattenSegments(segments), segments };
-    } catch (err) {
-      console.error("Не удалось проложить маршрут по тропам:", err);
-      return {
-        points: ordered,
-        segments: [{ points: ordered, viaTrail: false }],
-      };
-    }
-  }
-  return { points: ordered, segments: [{ points: ordered, viaTrail: null }] };
+  return { points: maybeOrderByProximity(points) };
 }
 
 function pointsToTrack(points, name) {
@@ -702,7 +508,6 @@ let mapLayerGroup = null;
 let trackLayerById = {};
 let pointLayerById = {};
 let pointsTrackPreviewLayers = [];
-let previewRequestToken = 0;
 // Tracks the point most recently added via a map click, so a second click on
 // that exact point (while still in add mode) removes it — a quick "undo"
 // for an accidental/misplaced click, without affecting any other point.
@@ -754,27 +559,6 @@ function pointDivIcon(selected) {
   });
 }
 
-function previewSegmentStyle(viaTrail) {
-  if (viaTrail === true) {
-    // Successfully routed along a real trail/path.
-    return { color: "#16a34a", weight: 4, opacity: 0.9 };
-  }
-  if (viaTrail === false) {
-    // Routing was attempted for this hop but rejected (off-trail point or
-    // too big a detour) — connected with a plain straight line instead.
-    return { color: "#f59e0b", weight: 4, opacity: 0.85, dashArray: "2 8" };
-  }
-  // Routing wasn't requested at all — just a plain order preview.
-  return { color: "#16a34a", weight: 4, opacity: 0.85, dashArray: "2 8" };
-}
-
-function previewSegmentTooltip(viaTrail) {
-  if (viaTrail === true) return "По тропе";
-  if (viaTrail === false)
-    return "Напрямую (тропа не найдена или точка не на тропе)";
-  return "Предпросмотр маршрута из выбранных точек";
-}
-
 function clearPointsTrackPreview() {
   if (mapLayerGroup) {
     for (const layer of pointsTrackPreviewLayers) {
@@ -785,33 +569,24 @@ function clearPointsTrackPreview() {
 }
 
 function updatePointsTrackPreview() {
-  const myToken = ++previewRequestToken;
   if (!mapLayerGroup) return;
   clearPointsTrackPreview();
   if (!pointsAsTrackRequested()) return;
   const selectedPoints = state.points.filter((p) => p.selected);
   if (selectedPoints.length < 2) return;
 
-  Promise.resolve(buildTrackPointsForExport(selectedPoints))
-    .catch(() => {
-      const ordered = maybeOrderByProximity(selectedPoints);
-      return {
-        points: ordered,
-        segments: [{ points: ordered, viaTrail: null }],
-      };
-    })
-    .then(({ segments }) => {
-      if (myToken !== previewRequestToken || !mapLayerGroup) return;
-      for (const seg of segments) {
-        if (seg.points.length < 2) continue;
-        const latlngs = seg.points.map((p) => [p.lat, p.lon]);
-        const line = L.polyline(latlngs, previewSegmentStyle(seg.viaTrail));
-        line.bindTooltip(previewSegmentTooltip(seg.viaTrail));
-        line.addTo(mapLayerGroup);
-        line.bringToBack();
-        pointsTrackPreviewLayers.push(line);
-      }
-    });
+  const ordered = maybeOrderByProximity(selectedPoints);
+  const latlngs = ordered.map((p) => [p.lat, p.lon]);
+  const line = L.polyline(latlngs, {
+    color: "#16a34a",
+    weight: 4,
+    opacity: 0.85,
+    dashArray: "2 8",
+  });
+  line.bindTooltip("Предпросмотр маршрута из выбранных точек");
+  line.addTo(mapLayerGroup);
+  line.bringToBack();
+  pointsTrackPreviewLayers.push(line);
 }
 
 function toggleTrackSelection(id) {
@@ -1059,18 +834,6 @@ document
     updatePointsTrackPreview();
   });
 
-document
-  .getElementById("points-route-via-trails")
-  .addEventListener("change", () => {
-    updatePointsTrackPreview();
-  });
-
-document
-  .getElementById("trail-max-deviation")
-  .addEventListener("change", () => {
-    updatePointsTrackPreview();
-  });
-
 document.getElementById("map-drag-mode").addEventListener("change", () => {
   const enabled = mapDragModeRequested();
   for (const marker of Object.values(pointLayerById)) {
@@ -1088,9 +851,6 @@ document.getElementById("map-drag-mode").addEventListener("change", () => {
 document.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     const scope = btn.dataset.scope;
-    const usesRouting =
-      pointsAsTrackRequested() && pointsRouteViaTrailsRequested();
-    if (usesRouting) showToast("Прокладываем маршрут по тропам…");
     const gpx = await gpxForScope(scope);
     if (btn.dataset.action === "copy") {
       const ok = await copyToClipboard(gpx);
