@@ -41,9 +41,39 @@
           <span id="file-drop-text">Нажмите, чтобы выбрать KMZ/KML файл</span>
         </label>
         <p id="file-status" class="file-status"></p>
+
+        <div class="manual-add">
+          <h3>Добавить точку вручную</h3>
+          <div class="manual-add-fields">
+            <input
+              type="text"
+              id="manual-point-name"
+              placeholder="Название (необязательно)"
+            />
+            <input
+              type="text"
+              id="manual-point-lat"
+              inputmode="decimal"
+              placeholder="Широта, напр. 55.7558"
+            />
+            <input
+              type="text"
+              id="manual-point-lon"
+              inputmode="decimal"
+              placeholder="Долгота, напр. 37.6173"
+            />
+            <button class="btn btn-primary" id="manual-point-add">
+              Добавить точку
+            </button>
+          </div>
+          <label class="option-toggle">
+            <input type="checkbox" id="map-click-add-mode" />
+            <span> Добавлять точку кликом по карте </span>
+          </label>
+        </div>
       </section>
 
-      <section class="card hidden" id="result-card">
+      <section class="card" id="result-card">
         <div class="section-block">
           <h2>Карта</h2>
           <p class="map-hint">
@@ -100,6 +130,15 @@
             <span>
               Соединять точки по близости, а не в порядке списка — полезно, если
               уточняющие точки были добавлены позже и стоят не по маршруту
+            </span>
+          </label>
+          <label class="option-toggle option-toggle-sub">
+            <input type="checkbox" id="points-route-via-trails" />
+            <span>
+              Прокладывать маршрут между точками по тропам/дорогам через
+              открытый OSRM-сервис, но не отклоняясь сильно от прямой — если
+              рядом нет тропы, точки соединяются напрямую (нужен интернет, может
+              занять время)
             </span>
           </label>
           <div class="action-grid">
@@ -183,7 +222,7 @@
 
         <div class="section-block">
           <button class="btn btn-secondary" id="reset-btn">
-            Загрузить другой файл
+            Очистить всё
           </button>
         </div>
       </section>

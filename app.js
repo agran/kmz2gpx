@@ -13,7 +13,6 @@ const state = {
 const fileInput = document.getElementById("file-input");
 const fileDropText = document.getElementById("file-drop-text");
 const fileStatus = document.getElementById("file-status");
-const resultCard = document.getElementById("result-card");
 const tracksList = document.getElementById("tracks-list");
 const pointsList = document.getElementById("points-list");
 const tracksEmpty = document.getElementById("tracks-empty");
@@ -257,8 +256,7 @@ function haversineMeters(a, b) {
   const lat2 = toRad(b.lat);
   const sinLat = Math.sin(dLat / 2);
   const sinLon = Math.sin(dLon / 2);
-  const h =
-    sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
@@ -291,6 +289,82 @@ function maybeOrderByProximity(points) {
     ? orderPointsByProximity(points)
     : points;
 }
+
+function pointsRouteViaTrailsRequested() {
+  const checkbox = document.getElementById("points-route-via-trails");
+  return !!(checkbox && checkbox.checked);
+}
+
+// Public FOSSGIS OSRM instance (no API key required) used to try to route
+// between two points along real trails/paths/roads.
+const TRAIL_ROUTING_URL = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
+// A routed detour is only used if it isn't more than this much longer than
+// the straight line between the two points; otherwise we fall back to a
+// straight segment (handles points placed off-trail).
+const TRAIL_ROUTE_MAX_DEVIATION_RATIO = 0.6;
+// Skip routing very short hops — not worth the request, and avoids noise.
+const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
+
+async function fetchTrailRoute(a, b) {
+  const url = `${TRAIL_ROUTING_URL}${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Routing request failed");
+  const data = await response.json();
+  if (data.code !== "Ok" || !data.routes || !data.routes.length) {
+    throw new Error("No route found");
+  }
+  const route = data.routes[0];
+  return {
+    distance: route.distance,
+    points: route.geometry.coordinates.map(([lon, lat]) => ({
+      lat,
+      lon,
+      ele: 0,
+      time: null,
+    })),
+  };
+}
+
+// Routes a single hop between two points along trails, falling back to a
+// plain straight line if routing fails or detours too far from the point.
+async function routeSegmentViaTrail(a, b) {
+  const straight = haversineMeters(a, b);
+  if (straight < TRAIL_ROUTE_MIN_SEGMENT_METERS) return [a, b];
+  try {
+    const { distance, points } = await fetchTrailRoute(a, b);
+    if (distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)) {
+      return points;
+    }
+  } catch (err) {
+    // Routing service unreachable/blocked/no path — fall back below so a
+    // single bad hop doesn't break the whole track.
+  }
+  return [a, b];
+}
+
+async function routePointsViaTrails(points) {
+  if (points.length < 2) return points.slice();
+  const result = [points[0]];
+  for (let i = 0; i < points.length - 1; i++) {
+    const segment = await routeSegmentViaTrail(points[i], points[i + 1]);
+    for (let j = 1; j < segment.length; j++) result.push(segment[j]);
+  }
+  return result;
+}
+
+async function buildTrackPointsForExport(points) {
+  const ordered = maybeOrderByProximity(points);
+  if (pointsRouteViaTrailsRequested()) {
+    try {
+      return await routePointsViaTrails(ordered);
+    } catch (err) {
+      console.error("Не удалось проложить маршрут по тропам:", err);
+      return ordered;
+    }
+  }
+  return ordered;
+}
+
 function pointsToTrack(points, name) {
   if (!points.length) return null;
   return {
@@ -302,16 +376,30 @@ function pointsToTrack(points, name) {
   };
 }
 
+function nextPointId() {
+  return state.points.length
+    ? Math.max(...state.points.map((p) => p.id)) + 1
+    : 0;
+}
+
+function nextTrackId() {
+  return state.tracks.length
+    ? Math.max(...state.tracks.map((t) => t.id)) + 1
+    : 1;
+}
+
 function gpxForScope(scope) {
   const asTrack = pointsAsTrackRequested();
   switch (scope) {
     case "all": {
       if (asTrack) {
-        const pointsTrack = pointsToTrack(maybeOrderByProximity(state.points));
-        const tracks = pointsTrack
-          ? [...state.tracks, pointsTrack]
-          : state.tracks;
-        return buildGpx({ tracks });
+        return buildTrackPointsForExport(state.points).then((ordered) => {
+          const pointsTrack = pointsToTrack(ordered);
+          const tracks = pointsTrack
+            ? [...state.tracks, pointsTrack]
+            : state.tracks;
+          return buildGpx({ tracks });
+        });
       }
       return buildGpx({ points: state.points, tracks: state.tracks });
     }
@@ -319,16 +407,20 @@ function gpxForScope(scope) {
       return buildGpx({ tracks: state.tracks.filter((t) => t.selected) });
     case "points-all": {
       if (asTrack) {
-        const pointsTrack = pointsToTrack(maybeOrderByProximity(state.points));
-        return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+        return buildTrackPointsForExport(state.points).then((ordered) => {
+          const pointsTrack = pointsToTrack(ordered);
+          return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+        });
       }
       return buildGpx({ points: state.points });
     }
     case "points-selected": {
       const selected = state.points.filter((p) => p.selected);
       if (asTrack) {
-        const pointsTrack = pointsToTrack(maybeOrderByProximity(selected));
-        return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+        return buildTrackPointsForExport(selected).then((ordered) => {
+          const pointsTrack = pointsToTrack(ordered);
+          return buildGpx({ tracks: pointsTrack ? [pointsTrack] : [] });
+        });
       }
       return buildGpx({ points: selected });
     }
@@ -391,6 +483,12 @@ let mapLayerGroup = null;
 let trackLayerById = {};
 let pointLayerById = {};
 let pointsTrackPreviewLine = null;
+let previewRequestToken = 0;
+
+function mapClickAddModeRequested() {
+  const checkbox = document.getElementById("map-click-add-mode");
+  return !!(checkbox && checkbox.checked);
+}
 
 function ensureMap() {
   if (map) return map;
@@ -402,6 +500,11 @@ function ensureMap() {
   }).addTo(map);
   mapLayerGroup = L.layerGroup().addTo(map);
   map.setView([20, 0], 2);
+  map.on("click", (e) => {
+    if (!mapClickAddModeRequested()) return;
+    addManualPoint(e.latlng.lat, e.latlng.lng, "");
+    showToast("Точка добавлена по клику на карте");
+  });
   return map;
 }
 
@@ -430,6 +533,7 @@ function pointStyle(selected) {
 }
 
 function updatePointsTrackPreview() {
+  const myToken = ++previewRequestToken;
   if (!mapLayerGroup) return;
   if (pointsTrackPreviewLine) {
     mapLayerGroup.removeLayer(pointsTrackPreviewLine);
@@ -438,19 +542,24 @@ function updatePointsTrackPreview() {
   if (!pointsAsTrackRequested()) return;
   const selectedPoints = state.points.filter((p) => p.selected);
   if (selectedPoints.length < 2) return;
-  const orderedPoints = maybeOrderByProximity(selectedPoints);
-  const latlngs = orderedPoints.map((p) => [p.lat, p.lon]);
-  pointsTrackPreviewLine = L.polyline(latlngs, {
-    color: "#16a34a",
-    weight: 4,
-    opacity: 0.85,
-    dashArray: "2 8",
-  });
-  pointsTrackPreviewLine.bindTooltip(
-    "Предпросмотр маршрута из выбранных точек",
-  );
-  pointsTrackPreviewLine.addTo(mapLayerGroup);
-  pointsTrackPreviewLine.bringToBack();
+
+  Promise.resolve(buildTrackPointsForExport(selectedPoints))
+    .catch(() => maybeOrderByProximity(selectedPoints))
+    .then((orderedPoints) => {
+      if (myToken !== previewRequestToken || !mapLayerGroup) return;
+      const latlngs = orderedPoints.map((p) => [p.lat, p.lon]);
+      pointsTrackPreviewLine = L.polyline(latlngs, {
+        color: "#16a34a",
+        weight: 4,
+        opacity: 0.85,
+        dashArray: "2 8",
+      });
+      pointsTrackPreviewLine.bindTooltip(
+        "Предпросмотр маршрута из выбранных точек",
+      );
+      pointsTrackPreviewLine.addTo(mapLayerGroup);
+      pointsTrackPreviewLine.bringToBack();
+    });
 }
 
 function toggleTrackSelection(id) {
@@ -468,6 +577,44 @@ function togglePointSelection(id) {
   renderLists();
   updateMapStyles();
   updatePointsTrackPreview();
+}
+
+function createPointMarker(point) {
+  const marker = L.circleMarker(
+    [point.lat, point.lon],
+    pointStyle(point.selected),
+  );
+  marker.bindTooltip(escapeXml(point.name));
+  marker.on("click", (e) => {
+    L.DomEvent.stopPropagation(e);
+    togglePointSelection(point.id);
+  });
+  return marker;
+}
+
+function addManualPoint(lat, lon, name) {
+  const mapInstance = ensureMap();
+  const wasEmpty = state.points.length === 0 && state.tracks.length === 0;
+  const id = nextPointId();
+  const point = {
+    id,
+    name: name && name.trim() ? name.trim() : `Точка ${id + 1}`,
+    lat,
+    lon,
+    ele: 0,
+    time: null,
+    selected: true,
+  };
+  state.points.push(point);
+  const marker = createPointMarker(point);
+  marker.addTo(mapLayerGroup);
+  pointLayerById[point.id] = marker;
+  if (wasEmpty) {
+    mapInstance.setView([lat, lon], 15);
+  }
+  renderLists();
+  updatePointsTrackPreview();
+  return point;
 }
 
 function renderMap() {
@@ -496,12 +643,7 @@ function renderMap() {
   }
 
   for (const point of state.points) {
-    const marker = L.circleMarker(
-      [point.lat, point.lon],
-      pointStyle(point.selected),
-    );
-    marker.bindTooltip(escapeXml(point.name));
-    marker.on("click", () => togglePointSelection(point.id));
+    const marker = createPointMarker(point);
     marker.addTo(mapLayerGroup);
     pointLayerById[point.id] = marker;
     allLatLngs.push([point.lat, point.lon]);
@@ -625,10 +767,43 @@ document
     updatePointsTrackPreview();
   });
 
+document
+  .getElementById("points-route-via-trails")
+  .addEventListener("change", () => {
+    updatePointsTrackPreview();
+  });
+
+document.getElementById("manual-point-add").addEventListener("click", () => {
+  const nameInput = document.getElementById("manual-point-name");
+  const latInput = document.getElementById("manual-point-lat");
+  const lonInput = document.getElementById("manual-point-lon");
+  const lat = parseFloat(latInput.value.replace(",", "."));
+  const lon = parseFloat(lonInput.value.replace(",", "."));
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon) ||
+    lat < -90 ||
+    lat > 90 ||
+    lon < -180 ||
+    lon > 180
+  ) {
+    showToast("Введите корректные широту и долготу", true);
+    return;
+  }
+  addManualPoint(lat, lon, nameInput.value);
+  nameInput.value = "";
+  latInput.value = "";
+  lonInput.value = "";
+  showToast("Точка добавлена");
+});
+
 document.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     const scope = btn.dataset.scope;
-    const gpx = gpxForScope(scope);
+    const usesRouting =
+      pointsAsTrackRequested() && pointsRouteViaTrailsRequested();
+    if (usesRouting) showToast("Прокладываем маршрут по тропам…");
+    const gpx = await gpxForScope(scope);
     if (btn.dataset.action === "copy") {
       const ok = await copyToClipboard(gpx);
       showToast(
@@ -649,11 +824,8 @@ document.getElementById("reset-btn").addEventListener("click", () => {
   fileStatus.textContent = "";
   fileStatus.classList.remove("error");
   fileDropText.textContent = "Нажмите, чтобы выбрать KMZ/KML файл";
-  resultCard.classList.add("hidden");
-  if (mapLayerGroup) mapLayerGroup.clearLayers();
-  trackLayerById = {};
-  pointLayerById = {};
-  pointsTrackPreviewLine = null;
+  renderLists();
+  renderMap();
 });
 
 fileInput.addEventListener("change", async () => {
@@ -663,7 +835,6 @@ fileInput.addEventListener("change", async () => {
   fileDropText.textContent = file.name;
   fileStatus.classList.remove("error");
   fileStatus.textContent = "Обработка файла...";
-  resultCard.classList.add("hidden");
 
   try {
     const kmlText = await readFileAsKmlText(file);
@@ -673,13 +844,17 @@ fileInput.addEventListener("change", async () => {
       throw new Error("В файле не найдено ни точек, ни треков");
     }
 
-    state.points = points;
-    state.tracks = tracks;
+    const pointIdOffset = nextPointId();
+    const trackIdOffset = nextTrackId();
+    const newPoints = points.map((p, i) => ({ ...p, id: pointIdOffset + i }));
+    const newTracks = tracks.map((t, i) => ({ ...t, id: trackIdOffset + i }));
+
+    state.points = state.points.concat(newPoints);
+    state.tracks = state.tracks.concat(newTracks);
     state.fileBaseName = file.name.replace(/\.(kmz|kml)$/i, "") || "export";
 
-    fileStatus.textContent = `Готово: ${tracks.length} трек(ов), ${points.length} точ(ек)`;
+    fileStatus.textContent = `Добавлено: ${tracks.length} трек(ов), ${points.length} точ(ек). Всего: ${state.tracks.length} трек(ов), ${state.points.length} точ(ек)`;
     renderLists();
-    resultCard.classList.remove("hidden");
     renderMap();
     requestAnimationFrame(() => {
       if (map) map.invalidateSize();
@@ -689,6 +864,12 @@ fileInput.addEventListener("change", async () => {
     fileStatus.classList.add("error");
     fileStatus.textContent = err.message || "Ошибка при обработке файла";
   }
+});
+
+renderLists();
+renderMap();
+requestAnimationFrame(() => {
+  if (map) map.invalidateSize();
 });
 
 /* ---------- PWA install / offline support ---------- */
