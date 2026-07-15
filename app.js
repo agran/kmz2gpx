@@ -352,7 +352,11 @@ function legToPoints(leg) {
     const coords = (step.geometry && step.geometry.coordinates) || [];
     for (const [lon, lat] of coords) {
       const last = pts[pts.length - 1];
-      if (last && Math.abs(last.lat - lat) < 1e-9 && Math.abs(last.lon - lon) < 1e-9) {
+      if (
+        last &&
+        Math.abs(last.lat - lat) < 1e-9 &&
+        Math.abs(last.lon - lon) < 1e-9
+      ) {
         continue;
       }
       pts.push({ lat, lon, ele: 0, time: null });
@@ -383,7 +387,9 @@ async function routeChunkInOneRequest(points) {
     console.warn("[OSRM] Запрос не выполнен (сеть/CORS):", networkErr);
     throw networkErr;
   }
-  console.log(`[OSRM] Ответ сервера: HTTP ${response.status} ${response.statusText}`);
+  console.log(
+    `[OSRM] Ответ сервера: HTTP ${response.status} ${response.statusText}`,
+  );
 
   if (response.status === 429) {
     trailRoutingRateLimited = true;
@@ -412,7 +418,9 @@ async function routeChunkInOneRequest(points) {
 
   const offTrail = (data.waypoints || []).map(
     (wp) =>
-      !!wp && typeof wp.distance === "number" && wp.distance > TRAIL_WAYPOINT_SNAP_MAX_METERS,
+      !!wp &&
+      typeof wp.distance === "number" &&
+      wp.distance > TRAIL_WAYPOINT_SNAP_MAX_METERS,
   );
   console.log(
     `[OSRM] Успех: код "${data.code}", ${data.waypoints ? data.waypoints.length : 0} waypoints, ` +
@@ -444,7 +452,8 @@ async function routeChunkInOneRequest(points) {
         `по тропе ${leg.distance.toFixed(0)} м → ${usedTrail ? "используем тропу" : "используем прямую"}` +
         (endpointOffTrail ? " (точка снята с тропы слишком далеко)" : ""),
     );
-    for (let j = 1; j < segmentPoints.length; j++) result.push(segmentPoints[j]);
+    for (let j = 1; j < segmentPoints.length; j++)
+      result.push(segmentPoints[j]);
   }
   return result;
 }
@@ -768,6 +777,10 @@ function createPointMarker(point) {
   marker.bindTooltip(escapeXml(point.name));
   marker.on("click", (e) => {
     L.DomEvent.stopPropagation(e);
+    // While adding points by clicking the map, clicking an existing point
+    // shouldn't change its selection — the click is meant to place a new
+    // point there, not to toggle this one on/off.
+    if (mapClickAddModeRequested()) return;
     togglePointSelection(point.id);
   });
   marker.on("dragend", () => {
@@ -820,10 +833,10 @@ function renderMap() {
       const polyline = L.polyline(latlngs, trackStyle(track.selected));
       polyline.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-        // While adding points by clicking the map, don't let a click on a
-        // deactivated track reactivate it — the click was meant to place a
-        // point, not to toggle a track back on.
-        if (mapClickAddModeRequested() && !track.selected) return;
+        // While adding points by clicking the map, clicking an existing
+        // track shouldn't change its selection — the click is meant to
+        // place a new point there, not to toggle this track on/off.
+        if (mapClickAddModeRequested()) return;
         toggleTrackSelection(track.id);
       });
       polyline.bindTooltip(escapeXml(track.name));
