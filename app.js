@@ -305,10 +305,26 @@ const TRAIL_ROUTING_URL =
 const TRAIL_ROUTE_MAX_DEVIATION_RATIO = 0.6;
 // Skip routing very short hops — not worth the request, and avoids noise.
 const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
+// Minimum delay between requests to the free public routing service, so we
+// don't hammer it and trigger rate limiting (HTTP 429).
+const TRAIL_ROUTE_REQUEST_DELAY_MS = 400;
+
+// Set for the duration of a single routePointsViaTrails() run once the
+// service starts responding with 429, so we stop sending more requests and
+// just fall back to straight lines for the remaining segments.
+let trailRoutingRateLimited = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function fetchTrailRoute(a, b) {
   const url = `${TRAIL_ROUTING_URL}${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
   const response = await fetch(url);
+  if (response.status === 429) {
+    trailRoutingRateLimited = true;
+    throw new Error("Routing service rate limit (429)");
+  }
   if (!response.ok) throw new Error("Routing request failed");
   const data = await response.json();
   if (data.code !== "Ok" || !data.routes || !data.routes.length) {
@@ -327,28 +343,41 @@ async function fetchTrailRoute(a, b) {
 }
 
 // Routes a single hop between two points along trails, falling back to a
-// plain straight line if routing fails or detours too far from the point.
+// plain straight line if routing fails, is rate-limited, or detours too far
+// from the point.
 async function routeSegmentViaTrail(a, b) {
   const straight = haversineMeters(a, b);
   if (straight < TRAIL_ROUTE_MIN_SEGMENT_METERS) return [a, b];
+  if (trailRoutingRateLimited) return [a, b];
   try {
     const { distance, points } = await fetchTrailRoute(a, b);
     if (distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)) {
       return points;
     }
   } catch (err) {
-    // Routing service unreachable/blocked/no path — fall back below so a
-    // single bad hop doesn't break the whole track.
+    // Routing service unreachable/blocked/rate-limited/no path — fall back
+    // below so a single bad hop doesn't break the whole track.
   }
   return [a, b];
 }
 
 async function routePointsViaTrails(points) {
   if (points.length < 2) return points.slice();
+  trailRoutingRateLimited = false;
   const result = [points[0]];
   for (let i = 0; i < points.length - 1; i++) {
     const segment = await routeSegmentViaTrail(points[i], points[i + 1]);
     for (let j = 1; j < segment.length; j++) result.push(segment[j]);
+    const isLastSegment = i === points.length - 2;
+    if (!isLastSegment && !trailRoutingRateLimited) {
+      await sleep(TRAIL_ROUTE_REQUEST_DELAY_MS);
+    }
+  }
+  if (trailRoutingRateLimited) {
+    showToast(
+      "Сервис маршрутов по тропам временно ограничил запросы — часть точек соединена напрямую",
+      true,
+    );
   }
   return result;
 }
