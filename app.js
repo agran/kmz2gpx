@@ -640,6 +640,10 @@ function renderMap() {
       const polyline = L.polyline(latlngs, trackStyle(track.selected));
       polyline.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
+        // While adding points by clicking the map, don't let a click on a
+        // deactivated track reactivate it — the click was meant to place a
+        // point, not to toggle a track back on.
+        if (mapClickAddModeRequested() && !track.selected) return;
         toggleTrackSelection(track.id);
       });
       polyline.bindTooltip(escapeXml(track.name));
