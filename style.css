@@ -188,6 +188,26 @@ main {
   border-bottom: none;
 }
 
+.btn-icon {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+}
+
+.btn-icon:hover,
+.btn-icon:active {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
 .item-row input[type="checkbox"] {
   width: 20px;
   height: 20px;

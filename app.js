@@ -6,6 +6,11 @@ const state = {
   points: [], // { id, name, lat, lon, ele, time, selected }
   tracks: [], // { id, name, segments: [ [ {lat, lon, ele, time}, ... ] ], selected }
   fileBaseName: "export",
+  // Point-id pairs ("idA_idB", smaller id first) that the user has
+  // manually told the proximity-ordering algorithm never to connect
+  // directly — e.g. to break up a leg that looks fine geometrically but
+  // isn't actually how the route goes.
+  forbiddenConnections: new Set(),
 };
 
 /* ---------- DOM refs ---------- */
@@ -343,6 +348,18 @@ function pointsOrderByProximityRequested() {
   return !!(checkbox && checkbox.checked);
 }
 
+function connectionKey(idA, idB) {
+  return idA < idB ? `${idA}_${idB}` : `${idB}_${idA}`;
+}
+
+function isConnectionForbidden(a, b) {
+  return state.forbiddenConnections.has(connectionKey(a.id, b.id));
+}
+
+function forbidConnection(a, b) {
+  state.forbiddenConnections.add(connectionKey(a.id, b.id));
+}
+
 function haversineMeters(a, b) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -367,13 +384,27 @@ function nearestNeighborOrder(points) {
   const ordered = [remaining.shift()];
   while (remaining.length) {
     const last = ordered[ordered.length - 1];
-    let bestIndex = 0;
+    let bestIndex = -1;
     let bestDist = Infinity;
     for (let i = 0; i < remaining.length; i++) {
+      if (isConnectionForbidden(last, remaining[i])) continue;
       const dist = haversineMeters(last, remaining[i]);
       if (dist < bestDist) {
         bestDist = dist;
         bestIndex = i;
+      }
+    }
+    if (bestIndex === -1) {
+      // Every remaining point is manually forbidden from connecting to
+      // `last` — a forbidden connection is a strong preference, not a hard
+      // constraint, so fall back to plain nearest-neighbor rather than
+      // getting stuck.
+      for (let i = 0; i < remaining.length; i++) {
+        const dist = haversineMeters(last, remaining[i]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIndex = i;
+        }
       }
     }
     ordered.push(remaining.splice(bestIndex, 1)[0]);
@@ -406,10 +437,16 @@ function orOptImprove(points) {
         (before ? haversineMeters(before, point) : 0) +
         (after ? haversineMeters(point, after) : 0) -
         (before && after ? haversineMeters(before, after) : 0);
+      // A manually forbidden connection can end up in the path anyway (see
+      // the nearest-neighbor fallback above) — in that case any legal spot
+      // is preferable to leaving it in place, not just a cheaper one.
+      const currentlyViolates =
+        (before && isConnectionForbidden(before, point)) ||
+        (after && isConnectionForbidden(point, after));
 
       const reduced = path.slice(0, i).concat(path.slice(i + 1));
       let bestGap = -1;
-      let bestInsertionCost = removalGain; // must beat leaving it in place
+      let bestInsertionCost = currentlyViolates ? Infinity : removalGain;
       for (let gap = 0; gap <= reduced.length; gap++) {
         // gap === i is the point's current position; gap === i - 1 puts it
         // right back where it started too (same edges, zero-cost no-op) —
@@ -417,6 +454,12 @@ function orOptImprove(points) {
         if (gap === i || gap === i - 1) continue;
         const left = gap > 0 ? reduced[gap - 1] : null;
         const right = gap < reduced.length ? reduced[gap] : null;
+        if (
+          (left && isConnectionForbidden(left, point)) ||
+          (right && isConnectionForbidden(point, right))
+        ) {
+          continue;
+        }
         const insertionCost =
           (left ? haversineMeters(left, point) : 0) +
           (right ? haversineMeters(point, right) : 0) -
@@ -643,17 +686,46 @@ function updatePointsTrackPreview() {
   if (selectedPoints.length < 2) return;
 
   const ordered = maybeOrderByProximity(selectedPoints);
-  const latlngs = ordered.map((p) => [p.lat, p.lon]);
-  const line = L.polyline(latlngs, {
-    color: "#16a34a",
-    weight: 4,
-    opacity: 0.85,
-    dashArray: "2 8",
-  });
-  line.bindTooltip("Предпросмотр маршрута из выбранных точек");
-  line.addTo(mapLayerGroup);
-  line.bringToBack();
-  pointsTrackPreviewLayers.push(line);
+  for (let i = 0; i < ordered.length - 1; i++) {
+    const a = ordered[i];
+    const b = ordered[i + 1];
+    const line = L.polyline(
+      [
+        [a.lat, a.lon],
+        [b.lat, b.lon],
+      ],
+      {
+        color: "#16a34a",
+        weight: 4,
+        opacity: 0.85,
+        dashArray: "2 8",
+      },
+    );
+    line.bindTooltip("Клик — удалить это соединение и перестроить маршрут");
+    line.on("click", (e) => {
+      L.DomEvent.stopPropagation(e);
+      if (mapClickAddModeRequested()) {
+        // Consistent with track-polyline clicks in add mode: place a point
+        // on the line instead of editing the connection.
+        addManualPoint(e.latlng.lat, e.latlng.lng, "");
+        showToast("Точка добавлена по клику на карте");
+        return;
+      }
+      forbidConnection(a, b);
+      if (!pointsOrderByProximityRequested()) {
+        document.getElementById("points-order-by-proximity").checked = true;
+        showToast(
+          "Соединение удалено. Включено «соединять по близости» — иначе его нечем заменить",
+        );
+      } else {
+        showToast("Соединение удалено, маршрут перестроен");
+      }
+      updatePointsTrackPreview();
+    });
+    line.addTo(mapLayerGroup);
+    line.bringToBack();
+    pointsTrackPreviewLayers.push(line);
+  }
 }
 
 function toggleTrackSelection(id) {
@@ -685,6 +757,42 @@ function removePoint(id) {
   if (lastAddedPointId === id) lastAddedPointId = null;
   renderLists();
   updatePointsTrackPreview();
+}
+
+// Adds a second copy of an existing point right after it in the list, at
+// the same coordinates. Normally every point sits on a simple path with
+// exactly 2 neighbors (1 at the very ends) — that's enough for a route
+// that never crosses itself at a single named spot. But a real trail
+// sometimes passes through the very same junction more than once (e.g. a
+// there-and-back side spur off a junction that's also on the main way
+// through), and that junction genuinely needs 3 (or 4) connections. Since
+// the ordering algorithm treats every point as an independent node,
+// duplicating the junction point gives the extra node the proximity
+// ordering needs to route through that spot twice.
+function duplicatePoint(id) {
+  const original = state.points.find((p) => p.id === id);
+  if (!original) return;
+  const mapInstance = ensureMap();
+  const idx = state.points.findIndex((p) => p.id === id);
+  const point = {
+    id: nextPointId(),
+    name: original.name,
+    lat: original.lat,
+    lon: original.lon,
+    ele: original.ele,
+    time: original.time,
+    selected: true,
+  };
+  state.points.splice(idx + 1, 0, point);
+  const marker = createPointMarker(point);
+  marker.addTo(mapLayerGroup);
+  pointLayerById[point.id] = marker;
+  renderLists();
+  updatePointsTrackPreview();
+  showToast(
+    "Точка продублирована — теперь маршрут может пройти через неё дважды (до 3 соединений)",
+  );
+  return point;
 }
 
 function createPointMarker(point) {
@@ -840,7 +948,8 @@ function renderLists() {
       <div class="item-info">
         <span class="item-name">${escapeXml(point.name)}</span>
         <span class="item-meta">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</span>
-      </div>`;
+      </div>
+      <button type="button" class="btn-icon" data-action="duplicate-point" data-id="${point.id}" title="Дублировать точку — чтобы маршрут мог пройти через это место дважды (узел с 3 соединениями)">⧉</button>`;
     pointsList.appendChild(li);
   }
 }
@@ -866,6 +975,12 @@ pointsList.addEventListener("change", (e) => {
     updateMapStyles();
     updatePointsTrackPreview();
   }
+});
+
+pointsList.addEventListener("click", (e) => {
+  const btn = e.target.closest('button[data-action="duplicate-point"]');
+  if (!btn) return;
+  duplicatePoint(Number(btn.dataset.id));
 });
 
 document.getElementById("tracks-select-all").addEventListener("click", () => {
@@ -935,6 +1050,7 @@ document.querySelectorAll("button[data-action]").forEach((btn) => {
 document.getElementById("reset-btn").addEventListener("click", () => {
   state.points = [];
   state.tracks = [];
+  state.forbiddenConnections.clear();
   lastAddedPointId = null;
   fileInput.value = "";
   fileStatus.textContent = "";
