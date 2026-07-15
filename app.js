@@ -356,12 +356,13 @@ function haversineMeters(a, b) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-// Greedy nearest-neighbor reordering: starts from the first point (in list
-// order) and repeatedly jumps to the closest remaining point. Useful when
-// clarifying/extra points were appended to the end of the list instead of
-// being placed in their proper position along the route.
-function orderPointsByProximity(points) {
-  if (points.length < 3) return points.slice();
+// Greedy nearest-neighbor construction: starts from the first point (in
+// list order) and repeatedly jumps to the closest remaining point. Gives a
+// reasonable starting order, but on its own it tends to strand a handful of
+// points in the wrong place — whichever point happens to be nearest *at
+// that particular step* isn't necessarily where it truly belongs in the
+// final path, so a "stray" point can end up visited way out of sequence.
+function nearestNeighborOrder(points) {
   const remaining = points.slice();
   const ordered = [remaining.shift()];
   while (remaining.length) {
@@ -378,6 +379,115 @@ function orderPointsByProximity(points) {
     ordered.push(remaining.splice(bestIndex, 1)[0]);
   }
   return ordered;
+}
+
+// 2-opt: reverses a segment of the path whenever doing so shortens the
+// total length. Fixes the "crossing"/zig-zagging paths that a
+// nearest-neighbor walk tends to produce.
+function twoOptImprove(points) {
+  const path = points.slice();
+  const n = path.length;
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (let i = 0; i < n - 2; i++) {
+      for (let j = i + 2; j < n - 1; j++) {
+        const a = path[i];
+        const b = path[i + 1];
+        const c = path[j];
+        const d = path[j + 1];
+        const before = haversineMeters(a, b) + haversineMeters(c, d);
+        const after = haversineMeters(a, c) + haversineMeters(b, d);
+        if (after < before - 1e-6) {
+          let lo = i + 1;
+          let hi = j;
+          while (lo < hi) {
+            const tmp = path[lo];
+            path[lo] = path[hi];
+            path[hi] = tmp;
+            lo++;
+            hi--;
+          }
+          improved = true;
+        }
+      }
+    }
+  }
+  return path;
+}
+
+// Or-opt: pulls a single point out of the path and reinserts it wherever it
+// actually fits best (including at either end of the path), whenever that
+// shortens the total length. This is what specifically fixes "stray"
+// points: a clarifying point added out of sequence gets moved to sit
+// between the two points it geographically belongs between, instead of
+// staying wherever the nearest-neighbor walk happened to visit it.
+function orOptImprove(points) {
+  let path = points.slice();
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (let i = 0; i < path.length; i++) {
+      const point = path[i];
+      const before = i > 0 ? path[i - 1] : null;
+      const after = i < path.length - 1 ? path[i + 1] : null;
+      const removalGain =
+        (before ? haversineMeters(before, point) : 0) +
+        (after ? haversineMeters(point, after) : 0) -
+        (before && after ? haversineMeters(before, after) : 0);
+
+      const reduced = path.slice(0, i).concat(path.slice(i + 1));
+      let bestGap = -1;
+      let bestInsertionCost = removalGain; // must beat leaving it in place
+      for (let gap = 0; gap <= reduced.length; gap++) {
+        // gap === i is the point's current position; gap === i - 1 puts it
+        // right back where it started too (same edges, zero-cost no-op) —
+        // skip both so we only act on genuine improvements.
+        if (gap === i || gap === i - 1) continue;
+        const left = gap > 0 ? reduced[gap - 1] : null;
+        const right = gap < reduced.length ? reduced[gap] : null;
+        const insertionCost =
+          (left ? haversineMeters(left, point) : 0) +
+          (right ? haversineMeters(point, right) : 0) -
+          (left && right ? haversineMeters(left, right) : 0);
+        if (insertionCost < bestInsertionCost - 1e-6) {
+          bestInsertionCost = insertionCost;
+          bestGap = gap;
+        }
+      }
+      if (bestGap !== -1) {
+        reduced.splice(bestGap, 0, point);
+        path = reduced;
+        improved = true;
+      }
+    }
+  }
+  return path;
+}
+
+// Reorders points to (approximately) minimize total path length: builds an
+// initial nearest-neighbor walk, then repeatedly refines it with 2-opt
+// (un-crosses the path) and Or-opt (relocates individual stray points to
+// wherever they actually fit) until neither finds any further improvement.
+// Useful when clarifying/extra points were appended to the end of the list
+// instead of being placed in their proper position along the route.
+function orderPointsByProximity(points) {
+  if (points.length < 3) return points.slice();
+  let path = nearestNeighborOrder(points);
+  let changed = true;
+  let safetyCounter = 0;
+  // 2-opt and Or-opt each fix different kinds of defects and can open up
+  // new opportunities for one another, so keep alternating between them
+  // until a full round of both makes no further change (capped as a safety
+  // net against float-noise oscillation on pathological inputs).
+  while (changed && safetyCounter < 20) {
+    const before = path;
+    path = twoOptImprove(path);
+    path = orOptImprove(path);
+    changed = path.some((p, idx) => p !== before[idx]);
+    safetyCounter++;
+  }
+  return path;
 }
 
 function maybeOrderByProximity(points) {
