@@ -308,18 +308,60 @@ const TRAIL_ROUTE_MIN_SEGMENT_METERS = 20;
 // Minimum delay between requests to the free public routing service, so we
 // don't hammer it and trigger rate limiting (HTTP 429).
 const TRAIL_ROUTE_REQUEST_DELAY_MS = 400;
+// OSRM can route through many waypoints in a single request (one HTTP call
+// instead of one per hop). For very large point counts we still split into
+// a handful of chunks to keep the URL/response size and server load sane.
+const TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST = 100;
 
 // Set for the duration of a single routePointsViaTrails() run once the
 // service starts responding with 429, so we stop sending more requests and
-// just fall back to straight lines for the remaining segments.
+// just fall back to straight lines for the remaining points.
 let trailRoutingRateLimited = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchTrailRoute(a, b) {
-  const url = `${TRAIL_ROUTING_URL}${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+// Splits points into overlapping chunks (each chunk shares its boundary
+// point with the next) so a single OSRM request can cover up to
+// TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST waypoints at a time.
+function chunkPointsForRouting(points, maxPerChunk) {
+  if (points.length <= maxPerChunk) return [points];
+  const chunks = [];
+  let start = 0;
+  while (start < points.length - 1) {
+    const end = Math.min(start + maxPerChunk - 1, points.length - 1);
+    chunks.push(points.slice(start, end + 1));
+    if (end >= points.length - 1) break;
+    start = end;
+  }
+  return chunks;
+}
+
+// Flattens a leg's turn-by-turn steps into a single ordered list of
+// coordinates, dropping the duplicate point shared by consecutive steps.
+function legToPoints(leg) {
+  const pts = [];
+  for (const step of leg.steps || []) {
+    const coords = (step.geometry && step.geometry.coordinates) || [];
+    for (const [lon, lat] of coords) {
+      const last = pts[pts.length - 1];
+      if (last && Math.abs(last.lat - lat) < 1e-9 && Math.abs(last.lon - lon) < 1e-9) {
+        continue;
+      }
+      pts.push({ lat, lon, ele: 0, time: null });
+    }
+  }
+  return pts;
+}
+
+// Routes every point in a chunk in one HTTP request. OSRM returns one "leg"
+// per consecutive pair of waypoints, each with its own distance — so we can
+// still fall back to a straight line for individual hops that detour too
+// far, exactly as before, but from a single response instead of N requests.
+async function routeChunkInOneRequest(points) {
+  const coordsParam = points.map((p) => `${p.lon},${p.lat}`).join(";");
+  const url = `${TRAIL_ROUTING_URL}${coordsParam}?overview=false&geometries=geojson&steps=true`;
   const response = await fetch(url);
   if (response.status === 429) {
     trailRoutingRateLimited = true;
@@ -330,49 +372,60 @@ async function fetchTrailRoute(a, b) {
   if (data.code !== "Ok" || !data.routes || !data.routes.length) {
     throw new Error("No route found");
   }
-  const route = data.routes[0];
-  return {
-    distance: route.distance,
-    points: route.geometry.coordinates.map(([lon, lat]) => ({
-      lat,
-      lon,
-      ele: 0,
-      time: null,
-    })),
-  };
-}
 
-// Routes a single hop between two points along trails, falling back to a
-// plain straight line if routing fails, is rate-limited, or detours too far
-// from the point.
-async function routeSegmentViaTrail(a, b) {
-  const straight = haversineMeters(a, b);
-  if (straight < TRAIL_ROUTE_MIN_SEGMENT_METERS) return [a, b];
-  if (trailRoutingRateLimited) return [a, b];
-  try {
-    const { distance, points } = await fetchTrailRoute(a, b);
-    if (distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)) {
-      return points;
+  const legs = data.routes[0].legs || [];
+  const result = [points[0]];
+  for (let i = 0; i < legs.length; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const straight = haversineMeters(a, b);
+    const leg = legs[i];
+    let segmentPoints = [a, b];
+    if (
+      straight >= TRAIL_ROUTE_MIN_SEGMENT_METERS &&
+      leg.distance <= straight * (1 + TRAIL_ROUTE_MAX_DEVIATION_RATIO)
+    ) {
+      const legPoints = legToPoints(leg);
+      if (legPoints.length >= 2) segmentPoints = legPoints;
     }
-  } catch (err) {
-    // Routing service unreachable/blocked/rate-limited/no path — fall back
-    // below so a single bad hop doesn't break the whole track.
+    for (let j = 1; j < segmentPoints.length; j++) result.push(segmentPoints[j]);
   }
-  return [a, b];
+  return result;
 }
 
 async function routePointsViaTrails(points) {
   if (points.length < 2) return points.slice();
   trailRoutingRateLimited = false;
+
+  const chunks = chunkPointsForRouting(
+    points,
+    TRAIL_ROUTE_MAX_WAYPOINTS_PER_REQUEST,
+  );
   const result = [points[0]];
-  for (let i = 0; i < points.length - 1; i++) {
-    const segment = await routeSegmentViaTrail(points[i], points[i + 1]);
-    for (let j = 1; j < segment.length; j++) result.push(segment[j]);
-    const isLastSegment = i === points.length - 2;
-    if (!isLastSegment && !trailRoutingRateLimited) {
+
+  for (let c = 0; c < chunks.length; c++) {
+    const chunk = chunks[c];
+    if (trailRoutingRateLimited) {
+      for (let j = 1; j < chunk.length; j++) result.push(chunk[j]);
+      continue;
+    }
+    try {
+      const routedChunk = await routeChunkInOneRequest(chunk);
+      for (let j = 1; j < routedChunk.length; j++) result.push(routedChunk[j]);
+    } catch (err) {
+      if (!trailRoutingRateLimited) {
+        console.warn(
+          "Не удалось проложить маршрут по тропам для участка, используем прямые линии:",
+          err,
+        );
+      }
+      for (let j = 1; j < chunk.length; j++) result.push(chunk[j]);
+    }
+    if (c < chunks.length - 1 && !trailRoutingRateLimited) {
       await sleep(TRAIL_ROUTE_REQUEST_DELAY_MS);
     }
   }
+
   if (trailRoutingRateLimited) {
     showToast(
       "Сервис маршрутов по тропам временно ограничил запросы — часть точек соединена напрямую",
